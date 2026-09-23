@@ -1,0 +1,8 @@
+# عقده ای / Oghdeii runtime requirements
+numpy>=1.24.0
+scipy>=1.10.0
+sounddevice>=0.4.6
+PyQt6>=6.5.0
+pynput>=1.7.6
+typesafe-sdk>=0.7.1,<1
+pyinstaller>=6.0.0
