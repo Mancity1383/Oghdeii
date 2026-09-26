@@ -13,7 +13,7 @@ from action_executor import (
     resolve_voice_action,
 )
 from audio_engine import AudioEngine
-from config_manager import ConfigManager, DEFAULT_CONFIG
+from config_manager import DEFAULT_CONFIG, ConfigManager
 from tap_detector import TapDetector
 from voice_detector import VoiceDetector
 

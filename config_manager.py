@@ -28,6 +28,12 @@ DEFAULT_CONFIG = {
     "triple_confirm_ms": 220,
     "active_mode": "knock",  # "knock" or "voice"
     "enable_voice_commands": True,
+    # Local ASR backend. Whisper is the default; "windows" keeps the legacy
+    # System.Speech helper available as a compatibility fallback.
+    "voice_backend": "whisper",
+    "whisper_model": "distil-small.en",
+    "whisper_device": "cpu",
+    "whisper_compute_type": "int8",
     # Balanced default for softer voices; use Voice Sensitivity for machine-specific tuning.
     "voice_confidence_threshold": 0.55,
     "voice_command_cooldown_ms": 650,
@@ -210,6 +216,15 @@ class ConfigManager:
         cfg["v1m_endpoint"] = str(cfg.get("v1m_endpoint") or DEFAULT_CONFIG["v1m_endpoint"]).strip()[:200]
         cfg["v1m_model"] = str(cfg.get("v1m_model") or DEFAULT_CONFIG["v1m_model"]).strip()[:64]
         cfg["v1m_api_key"] = str(cfg.get("v1m_api_key") or "").strip()[:256]
+        backend = str(cfg.get("voice_backend") or "whisper").strip().lower()
+        cfg["voice_backend"] = backend if backend in {"whisper", "windows"} else "whisper"
+        model = str(cfg.get("whisper_model") or "distil-small.en").strip()
+        cfg["whisper_model"] = model[:100]
+        device = str(cfg.get("whisper_device") or "cpu").strip().lower()
+        cfg["whisper_device"] = device if device in {"cpu", "cuda", "auto"} else "cpu"
+        compute = str(cfg.get("whisper_compute_type") or "int8").strip().lower()
+        allowed_compute = {"int8", "int8_float16", "float16", "float32"}
+        cfg["whisper_compute_type"] = compute if compute in allowed_compute else "int8"
         if cfg.get("crowded_mode"):
             cfg["detect_sides"] = True
         if cfg.get("active_mode") not in ("knock", "voice"):

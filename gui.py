@@ -1,22 +1,36 @@
 import os
 import sys
 import threading
-import time
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QIcon, QAction, QPainterPath
+from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QSlider, QComboBox, QCheckBox, QPushButton, QFrame,
-    QSystemTrayIcon, QMenu, QStackedWidget, QGridLayout, QScrollArea, QSizePolicy,
-    QLineEdit, QDialog, QPlainTextEdit,
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSlider,
+    QStackedWidget,
+    QSystemTrayIcon,
+    QVBoxLayout,
+    QWidget,
 )
 
-from config_manager import ConfigManager, DEFAULT_CONFIG
+from action_executor import resolve_gesture_action, resolve_voice_action
 from audio_engine import AudioEngine
-from tap_detector import TapDetector, DetectedTapGesture
-from action_executor import ActionExecutor, resolve_gesture_action, resolve_voice_action
+from tap_detector import DetectedTapGesture
 
 ACTION_LABELS = {
     "copy": "📋 Copy (Ctrl + C)",
@@ -83,7 +97,10 @@ def make_card(title=None, title_color="#00f0ff"):
     layout.setSpacing(6)
     if title:
         lbl = QLabel(title)
-        lbl.setStyleSheet(f"color: {title_color}; font-weight: 700; font-size: 11px; background: transparent; border: none;")
+        lbl.setStyleSheet(
+            f"color: {title_color}; font-weight: 700; font-size: 11px; "
+            "background: transparent; border: none;"
+        )
         layout.addWidget(lbl)
     return frame, layout
 
@@ -251,7 +268,9 @@ class MainWindow(QMainWindow):
             # the Qt hand-off: it is bounded by v1m_wait_timeout_ms (3000 ms) and
             # never raises, so the helper's stdout pipe keeps draining.
             self.voice_detector.on_voice_command = self._on_voice_captured
-            self.voice_detector.on_status_change = lambda state, msg="": self.bridge.voice_status_signal.emit(state, msg)
+            self.voice_detector.on_status_change = (
+                lambda state, msg="": self.bridge.voice_status_signal.emit(state, msg)
+            )
 
         self.current_peak = 0.0
         self.current_threshold = 0.05
@@ -377,7 +396,11 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(title_box)
 
         self.status_badge = QLabel("● Knock Mode Active")
-        self.status_badge.setStyleSheet("font-size: 10px; font-weight: bold; color: #00f0ff; background-color: #0c2b32; padding: 4px 10px; border-radius: 10px; border: 1px solid #00f0ff;")
+        self.status_badge.setStyleSheet(
+            "font-size: 10px; font-weight: bold; color: #00f0ff; "
+            "background-color: #0c2b32; padding: 4px 10px; border-radius: 10px; "
+            "border: 1px solid #00f0ff;"
+        )
         header_layout.addStretch()
         header_layout.addWidget(self.status_badge)
         main_layout.addLayout(header_layout)
@@ -495,7 +518,9 @@ class MainWindow(QMainWindow):
         sens_label = QLabel("Shock Sensitivity:")
         sens_label.setStyleSheet("color: #e2e8f0; font-size: 11px; background: transparent;")
         self.sens_val_label = QLabel(f"{int(self.config.get('sensitivity', 0.90) * 100)}%")
-        self.sens_val_label.setStyleSheet("color: #00f0ff; font-weight: bold; font-size: 11px; background: transparent;")
+        self.sens_val_label.setStyleSheet(
+            "color: #00f0ff; font-weight: bold; font-size: 11px; background: transparent;"
+        )
         sens_row.addWidget(sens_label)
         sens_row.addStretch()
         sens_row.addWidget(self.sens_val_label)
@@ -599,7 +624,9 @@ class MainWindow(QMainWindow):
         v_sens_lbl.setStyleSheet("color: #e2e8f0; font-size: 11px; background: transparent;")
         conf_val = self.config.get("voice_confidence_threshold", 0.55)
         self.voice_sens_val_label = QLabel(f"{int(conf_val * 100)}%")
-        self.voice_sens_val_label.setStyleSheet("color: #c084fc; font-weight: bold; font-size: 11px; background: transparent;")
+        self.voice_sens_val_label.setStyleSheet(
+            "color: #c084fc; font-weight: bold; font-size: 11px; background: transparent;"
+        )
         v_sens_row.addWidget(v_sens_lbl)
         v_sens_row.addStretch()
         v_sens_row.addWidget(self.voice_sens_val_label)
@@ -633,13 +660,14 @@ class MainWindow(QMainWindow):
             }
         """)
         self.voice_sens_slider.valueChanged.connect(self.on_voice_sensitivity_changed)
-        # No sliderReleased restart: VoiceDetector watches the config and
-        # respawns the helper once (debounced) after the drag settles.
+        # The local Whisper backend reads this threshold on each utterance;
+        # V1M-enabled sessions still receive low-confidence transcripts.
         vs_vbox.addWidget(self.voice_sens_slider)
 
         voice_v1m_hint = QLabel(
-            "Windows listens with a constrained command vocabulary for better accuracy. "
-            "The recognized phrase and alternate readings are sent to V1M, which decides "
+            "Local faster-whisper listens after a short adaptive VAD, then normalizes "
+            "the transcript and matches it to the configured command vocabulary. "
+            "The transcript and alternate readings are sent to V1M, which decides "
             "whether to run an action and which configured action it means."
         )
         voice_v1m_hint.setWordWrap(True)
@@ -729,7 +757,7 @@ class MainWindow(QMainWindow):
         self.chk_notif.setChecked(self.config.get("enable_notifications", True))
         self.chk_notif.toggled.connect(lambda val: self.config.set("enable_notifications", val))
 
-        self.chk_wake_word = QCheckBox("Ask V1M to require a 'Laptop' wake phrase")
+        self.chk_wake_word = QCheckBox("Require a 'Laptop' wake phrase")
         self.chk_wake_word.setChecked(self.config.get("voice_require_wake_word", True))
         self.chk_wake_word.toggled.connect(self.on_wake_word_changed)
 
@@ -990,7 +1018,9 @@ class MainWindow(QMainWindow):
             if self.audio_engine.is_running:
                 self._set_status_badge("● Knock Mode Active", "#00f0ff", "#0c2b32")
         else:
-            self._show_engine_error(self.audio_engine.last_start_error or "The selected microphone could not be opened.")
+            self._show_engine_error(
+                self.audio_engine.last_start_error or "The selected microphone could not be opened."
+            )
             self._sync_active_microphone()
 
     def _sync_active_microphone(self):
@@ -1006,6 +1036,25 @@ class MainWindow(QMainWindow):
             "selected_input_device": dev_idx,
             "selected_input_device_signature": self.audio_engine.active_device_signature,
         })
+
+    def _wanted_input_device(self):
+        """Device index the config asks for, resolved against the cached list.
+
+        Signature first (indexes shift when hardware is plugged or unplugged),
+        then the stored index — the same order AudioEngine.resolve_device_index
+        uses, but without paying for a fresh PortAudio query: this runs on
+        every config change, including each tick of a slider drag.
+        """
+        signature = str(self.config.get("selected_input_device_signature") or "").casefold()
+        if signature:
+            for dev in getattr(self, "audio_devices", []):
+                if str(dev.get("signature") or "").casefold() == signature:
+                    return dev["index"]
+        raw = self.config.get("selected_input_device")
+        try:
+            return None if raw is None else int(raw)
+        except (TypeError, ValueError):
+            return None
 
     def _set_status_badge(self, text, color, background):
         self.status_badge.setText(text)
@@ -1107,6 +1156,40 @@ class MainWindow(QMainWindow):
             self.v1m_prob_slider.blockSignals(False)
             if hasattr(self, "v1m_prob_val"):
                 self.v1m_prob_val.setText(f"{prob_val}%")
+
+        risk_val = int(round(float(self.config.get("v1m_max_execution_risk", 4.0)) * 10))
+        if hasattr(self, "v1m_risk_slider") and risk_val != self.v1m_risk_slider.value():
+            self.v1m_risk_slider.blockSignals(True)
+            self.v1m_risk_slider.setValue(risk_val)
+            self.v1m_risk_slider.blockSignals(False)
+            if hasattr(self, "v1m_risk_val"):
+                # Read the slider back: it clamps to its 0..40 range, and the
+                # label must show what the gate actually uses.
+                shown = self.v1m_risk_slider.value()
+                self.v1m_risk_val.setText(f"{shown / 10:.1f}" + (" (off)" if shown >= 40 else ""))
+
+        # editingFinished only fires on focus loss / Enter, so a plain setText
+        # cannot re-enter _save_v1m_key — blockSignals just keeps the contract
+        # explicit. Never overwrite a field the user is mid-way through typing.
+        api_key = str(self.config.get("v1m_api_key") or "")
+        if (
+            hasattr(self, "v1m_key_input")
+            and not self.v1m_key_input.hasFocus()
+            and self.v1m_key_input.text() != api_key
+        ):
+            self.v1m_key_input.blockSignals(True)
+            self.v1m_key_input.setText(api_key)
+            self.v1m_key_input.blockSignals(False)
+
+        if hasattr(self, "combo_mic"):
+            want_dev = self._wanted_input_device()
+            idx = self.combo_mic.findData(want_dev) if want_dev is not None else -1
+            if idx >= 0 and idx != self.combo_mic.currentIndex():
+                # Display only: switching microphones restarts the audio
+                # stream, which is the engine's call, not a config echo.
+                self.combo_mic.blockSignals(True)
+                self.combo_mic.setCurrentIndex(idx)
+                self.combo_mic.blockSignals(False)
 
     def on_sensitivity_changed(self, val):
         sens = val / 100.0
@@ -1397,7 +1480,11 @@ class MainWindow(QMainWindow):
             if self.voice_detector and self.voice_detector.is_running:
                 self.voice_detector.stop()
             self.status_badge.setText("⏸ Monitoring Paused")
-            self.status_badge.setStyleSheet("font-size: 10px; font-weight: bold; color: #ffab00; background-color: #2b2210; padding: 4px 10px; border-radius: 10px; border: 1px solid #ffab00;")
+            self.status_badge.setStyleSheet(
+                "font-size: 10px; font-weight: bold; color: #ffab00; "
+                "background-color: #2b2210; padding: 4px 10px; border-radius: 10px; "
+                "border: 1px solid #ffab00;"
+            )
             self.btn_toggle.setText("Resume")
         else:
             self.btn_toggle.setText("Pause")

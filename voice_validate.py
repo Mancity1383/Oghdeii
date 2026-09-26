@@ -9,11 +9,10 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from config_manager import ConfigManager
-
 
 ROOT = Path(__file__).resolve().parent
 HELPER = ROOT / "VoiceRecognizerV1M.exe"
@@ -244,7 +243,7 @@ def main():
 
     proc = None
     report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "mode": mode,
         "threshold": threshold,
         "positive_trials": [],

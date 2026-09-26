@@ -1,11 +1,14 @@
-import time
-import sys
 import queue
+import sys
+import time
+
 import numpy as np
 import sounddevice as sd
 from scipy.signal import butter, sosfilt
-from config_manager import ConfigManager
+
 from audio_engine import AudioEngine
+from config_manager import ConfigManager
+
 
 class TapCalibrator:
     def __init__(self, sample_rate=None, block_size=256):
@@ -106,16 +109,19 @@ class TapCalibrator:
         voice_peak = float(np.max(np.abs(filtered_voice_low)))
         voice_ratio = float(np.sum(filtered_voice_high ** 2) / (np.sum(filtered_voice_low ** 2) + 1e-9))
         voice_harm = self._compute_harmonicity(filtered_voice_low[:1024])
-        print(f"   ✓ Voice Profile: Peak = {voice_peak:.4f}, High/Low Ratio = {voice_ratio:.4f}, Harmonicity = {voice_harm:.2f}")
+        print(
+            f"   ✓ Voice Profile: Peak = {voice_peak:.4f}, "
+            f"High/Low Ratio = {voice_ratio:.4f}, Harmonicity = {voice_harm:.2f}"
+        )
 
         return ambient_peak, voice_peak, voice_ratio, voice_harm
 
     def capture_tap_series(self, target_count, series_name, description, repeats=5, timeout_s=None):
-        print(f"\n==================================================================")
+        print("\n==================================================================")
         print(f"  {series_name}: {repeats} Trials ({description})")
-        print(f"==================================================================")
+        print("==================================================================")
         print(f"لطفاً {repeats} بار ضربه {description} را با بندانگشت روی بدنه لپ‌تاپ بزنید.")
-        print(f"بعد از آماده شدن، کلید Enter را بزنید تا برنامه شروع به شنیدن کند.")
+        print("بعد از آماده شدن، کلید Enter را بزنید تا برنامه شروع به شنیدن کند.")
         input("Press Enter to begin capturing this stage...")
 
         collected = []
@@ -170,12 +176,21 @@ class TapCalibrator:
                         for i in range(1, len(current_pulses))
                     ]
                     int_str = ", ".join(f"{interval}ms" for interval in intervals)
-                    print(f"  ✓ [Trial {trial_num}/{repeats} OK] Captured {target_count} taps! Peaks: [{p_str}], Intervals: [{int_str}]")
+                    print(
+                        f"  ✓ [Trial {trial_num}/{repeats} OK] Captured {target_count} taps! "
+                        f"Peaks: [{p_str}], Intervals: [{int_str}]"
+                    )
                 else:
-                    print(f"  ✓ [Trial {trial_num}/{repeats} OK] Captured Single Tap! Peak: {p_str}, Duration: {current_pulses[0]['dur_ms']:.1f}ms")
+                    print(
+                        f"  ✓ [Trial {trial_num}/{repeats} OK] Captured Single Tap! Peak: {p_str}, "
+                        f"Duration: {current_pulses[0]['dur_ms']:.1f}ms"
+                    )
                 trial_num += 1
             else:
-                print(f"  ⚠ [Received {len(current_pulses)} taps instead of {target_count}. Retrying trial {trial_num}...]")
+                print(
+                    f"  ⚠ [Received {len(current_pulses)} taps instead of {target_count}. "
+                    f"Retrying trial {trial_num}...]"
+                )
             current_pulses = []
 
         try:
@@ -240,7 +255,10 @@ class TapCalibrator:
             stream.close()
 
         if trial_num <= repeats:
-            print(f"  ⚠ مرحله پس از {timeout_s or max(120, repeats * 15)} ثانیه متوقف شد؛ {len(collected)} نمونه ثبت شد.")
+            print(
+                f"  ⚠ مرحله پس از {timeout_s or max(120, repeats * 15)} ثانیه متوقف شد؛ "
+                f"{len(collected)} نمونه ثبت شد."
+            )
 
         return collected
 
@@ -310,13 +328,13 @@ class TapCalibrator:
         min_interval = float(np.min(all_intervals)) if all_intervals else 90.0
         max_interval = float(np.max(all_intervals)) if all_intervals else 220.0
 
-        print(f"\n📊 آمارهای فیزیکی ضربات شما:")
+        print("\n📊 آمارهای فیزیکی ضربات شما:")
         print(f"   • نویز محیطی اتاق:                  {amb_peak:.4f}")
         print(f"   • کمترین قدرت ضربه شما (Min Peak):   {min_tap_peak:.4f}")
         print(f"   • میانگین قدرت ضربه (Avg Peak):     {avg_tap_peak:.4f}")
         print(f"   • بیشترین قدرت ضربه (Max Peak):     {max_tap_peak:.4f}")
         print(f"   • نسبت سیگنال به نویز (SNR):         {(avg_tap_peak / (amb_peak + 1e-6)):.1f}× برابر نویز محیط")
-        print(f"\n⏱ آمارهای زمان‌بندی (تمپو و سرعت ضربه زدن شما):")
+        print("\n⏱ آمارهای زمان‌بندی (تمپو و سرعت ضربه زدن شما):")
         print(f"   • کمترین فاصله بین دو ضربه متوالی:    {min_interval:.1f} میلی‌ثانیه")
         print(f"   • میانگین فاصله بین دو ضربه متوالی:  {avg_interval:.1f} میلی‌ثانیه")
         print(f"   • بیشترین فاصله بین دو ضربه متوالی:   {max_interval:.1f} میلی‌ثانیه")
@@ -361,7 +379,7 @@ class TapCalibrator:
         optimal_harmonicity = round(float(np.clip(np.percentile(harmonicity_values, 95) * 1.20, 0.25, 0.85)), 2)
         optimal_sustained_ms = int(np.clip(np.percentile(duration_values, 95) * 2.0, 30, 150))
 
-        print(f"\n⚙️ مقادیر بهینه محاسبه‌شده برای سیستم شما:")
+        print("\n⚙️ مقادیر بهینه محاسبه‌شده برای سیستم شما:")
         print(f"   • حساسیت بهینه (Sensitivity):          {int(optimal_sens * 100)}% ({optimal_sens:.2f})")
         print(f"   • پنجره زمانی دسته‌بندی (Grouping):       {optimal_grouping_ms} میلی‌ثانیه")
         print(f"   • دوره سکوت بازتاب (Refractory):        {optimal_refractory_ms} میلی‌ثانیه")

@@ -12,6 +12,8 @@ dependencies = [
     "numpy>=1.24,<3",
     "scipy>=1.10,<2",
     "sounddevice>=0.4.6,<1",
+    "faster-whisper>=1.1,<2",
+    "huggingface-hub>=0.21,<2",
     "PyQt6>=6.5,<7",
     "pynput>=1.7.6,<2",
     # v1m System-One intent classifier; when enabled, missing cloud decisions
@@ -30,6 +32,13 @@ build = ["pyinstaller>=6,<7"]
 # Convenience alias: `pip install .[cloud]` for a headless/text-only install
 # that skips PyQt6 but keeps the v1m guardrail.
 cloud = ["typesafe-sdk>=0.7,<1"]
+
+[tool.mypy]
+# Third-party runtime dependencies that ship no type information; typesafe_sdk
+# is typed (py.typed) and is therefore still checked strictly, as is this repo.
+[[tool.mypy.overrides]]
+module = ["pynput", "pynput.*", "sounddevice", "scipy", "scipy.*", "faster_whisper"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-ra"

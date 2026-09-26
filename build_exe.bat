@@ -39,6 +39,9 @@ echo [*] Compiling standalone package into dist\Oghdeii...
     --add-data="calibrate.py;." ^
     --add-data="voice_calibrate.py;." ^
     --collect-all="sounddevice" ^
+    --collect-all="faster_whisper" ^
+    --collect-all="ctranslate2" ^
+    --collect-all="av" ^
     --collect-all="scipy" ^
     --collect-all="pynput" ^
     --clean ^

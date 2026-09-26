@@ -6,7 +6,6 @@ import threading
 import time
 from pathlib import Path
 
-
 VOICE_COMMANDS = {
     "copy", "paste", "undo", "redo", "select_all", "screenshot", "lock",
     "show_desktop", "close_window", "open_calculator", "open_notepad",

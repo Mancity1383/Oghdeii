@@ -51,6 +51,7 @@ from collections.abc import Callable
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any
 
 __all__ = [
@@ -249,6 +250,9 @@ _NON_WORD_RE = re.compile(r"[^\w\s]+", re.UNICODE)
 # Optional SDK import — the app must import and run without it
 # ---------------------------------------------------------------------------
 
+# ``typesafe_sdk`` is an optional dependency: the slot stays Optional so the
+# "SDK missing" branch type-checks like the runtime fallback it is.
+_typesafe_sdk: ModuleType | None = None
 try:
     import typesafe_sdk as _typesafe_sdk
 except Exception as _sdk_exc:  # pragma: no cover - depends on the environment
@@ -913,13 +917,17 @@ class V1MVoiceVerifier:
     def _default_client_factory(api_key: str, base_url: str, timeout_s: float):
         if not sdk_available():
             raise RuntimeError("typesafe-sdk is not installed")
-        return _typesafe_sdk.TypeSafeClient(
+        # Imported here rather than reusing the module-level slot: that one has
+        # to stay Optional for the missing-SDK case, which would cost us the
+        # real client/retry signatures mypy checks this call against.
+        import typesafe_sdk as sdk
+        return sdk.TypeSafeClient(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout_s,
             # Single-pass, strict: a guardrail must never add hidden retries or
             # backoff on top of the wait budget.
-            retry=_typesafe_sdk.RetryPolicy(max_retries=0, timeout=timeout_s),
+            retry=sdk.RetryPolicy(max_retries=0, timeout=timeout_s),
         )
 
     def _get_client(self):
@@ -947,11 +955,18 @@ class V1MVoiceVerifier:
         """The single-pass System-One schema: one Noul, one Choice, one Score."""
         if not sdk_available():
             raise RuntimeError("typesafe-sdk is not installed")
-        sdk = _typesafe_sdk
+        # See _default_client_factory: the local import keeps the real question
+        # signatures in view, and NoulCriteria is built explicitly so the two
+        # yes/no keys are checked against the SDK's closed TypedDict instead of
+        # being smuggled through dict(), which no longer type-checks.
+        import typesafe_sdk as sdk
         return {
             Q_VALID: sdk.Noul(
                 instructions=NOUL_INSTRUCTIONS,
-                criteria=dict(NOUL_CRITERIA),
+                criteria=sdk.NoulCriteria(
+                    true=NOUL_CRITERIA["true"],
+                    false=NOUL_CRITERIA["false"],
+                ),
             ),
             Q_ACTION: sdk.Choice(
                 instructions=ACTION_INSTRUCTIONS,

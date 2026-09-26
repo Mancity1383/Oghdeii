@@ -2,8 +2,8 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 import webbrowser
+from typing import Any
 
 from config_manager import DEFAULT_CONFIG
 
@@ -17,9 +17,14 @@ SAFE_ACTIONS = {
     "open_terminal",
 }
 
-PynputController = None
-PynputKey = None
-_linux_keyboard = None
+# Platform injection backends, bound only by the branch that supports them
+# (user32/SendInput on Windows, pynput elsewhere). mypy walks BOTH sides of a
+# computed IS_WINDOWS flag, so the None side of every pairing has to be part of
+# the declared type — the platform guard itself remains runtime-only.
+user32: Any = None
+PynputController: Any = None
+PynputKey: Any = None
+_linux_keyboard: Any = None
 
 if IS_WINDOWS:
     import ctypes
@@ -138,10 +143,14 @@ if IS_WINDOWS:
         events.extend(_make_input(vk, True) for vk in reversed(vks))
         _send_inputs(events)
 else:
-    user32 = None
     try:
-        from pynput.keyboard import Controller as PynputController, Key as PynputKey
+        # Aliased on import: binding the names directly would re-define the
+        # module-level declarations above.
+        from pynput.keyboard import Controller as _PynputController
+        from pynput.keyboard import Key as _PynputKey
 
+        PynputController = _PynputController
+        PynputKey = _PynputKey
         _linux_keyboard = PynputController()
     except Exception:
         PynputController = None

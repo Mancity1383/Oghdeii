@@ -16,6 +16,7 @@ from gui import MainWindow
 from oghdeii.voice.v1m_verifier import V1MVoiceVerifier
 from tap_detector import TapDetector
 from voice_detector import VoiceDetector
+from whisper_voice_detector import WhisperVoiceDetector
 
 
 def acquire_single_instance_lock():
@@ -57,7 +58,13 @@ def run_cli_mode(config, executor, detector, audio, voice, verifier):
         print("  * Knock 2 times: ", config.get("actions", {}).get("double_tap"))
         print("  * Knock 3 times: ", config.get("actions", {}).get("triple_tap"))
     else:
-        print("  * Voice recognition: Windows System.Speech helper")
+        if config.get("voice_backend", "whisper") == "whisper":
+            print(
+                "  * Voice recognition: local faster-whisper "
+                f"({config.get('whisper_model', 'distil-small.en')})"
+            )
+        else:
+            print("  * Voice recognition: Windows System.Speech helper")
         print(f"  * v1m cloud guardrail: {'on' if verifier.enabled else 'off'}"
               f" (key: {verifier.key_source()})")
         print("  * v1m waiting timeout: "
@@ -71,11 +78,11 @@ def run_cli_mode(config, executor, detector, audio, voice, verifier):
         print(f"\n[CLI] Gesture: {gesture} -> {action_name}")
         executor.trigger(action_name)
 
-    def on_voice(cmd, conf, text=""):
+    def on_voice(cmd, conf, text="", alternates=None):
         # Guardrail: one bounded system_one pass on a worker thread.
         # Every failure path returns an offline result, so this never blocks or
         # raises here — the recogniser reader keeps running either way.
-        decision = verifier.verify(cmd, text, conf)
+        decision = verifier.verify(cmd, text, conf, alternates=alternates)
         if not decision.allow:
             print(f"\n[CLI] v1m blocked '{text or cmd}': {decision.reason}")
             return
@@ -109,7 +116,8 @@ def run_cli_mode(config, executor, detector, audio, voice, verifier):
         else:
             started = voice.start()
             if started:
-                started = voice.wait_until_ready(8.0)
+                ready_timeout = 300.0 if config.get("voice_backend", "whisper") == "whisper" else 8.0
+                started = voice.wait_until_ready(ready_timeout)
 
         if not started:
             detail = voice.last_error if mode == "voice" else audio.last_start_error
@@ -169,7 +177,9 @@ def main():
         detector.process_chunk(ll, lr, hl, hr, raw)
 
     audio.on_audio_chunk = handle_audio_chunk
-    voice = VoiceDetector(config_manager=config)
+    voice_backend = config.get("voice_backend", "whisper")
+    voice_class = WhisperVoiceDetector if voice_backend == "whisper" else VoiceDetector
+    voice = voice_class(config_manager=config)
     # Cloud guardrail for voice commands: no-ops (offline fallback) unless the
     # toggle is on and V1M_API_KEY is present.
     verifier = V1MVoiceVerifier(config)

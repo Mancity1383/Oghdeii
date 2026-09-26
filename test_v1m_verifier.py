@@ -19,6 +19,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 from config_manager import ConfigManager
@@ -31,6 +32,10 @@ from oghdeii.voice.v1m_verifier import (
     sdk_base_url,
 )
 
+# typesafe_sdk is an optional runtime dependency: holding it in an Any-typed
+# slot lets the "not installed" fallback assign None (mypy refuses to assign
+# None to an imported class) while SDK_OK still gates every use of it.
+SystemOneResponse: Any = None
 try:
     from typesafe_sdk import SystemOneResponse
 except Exception:  # pragma: no cover - SDK is an optional runtime dependency

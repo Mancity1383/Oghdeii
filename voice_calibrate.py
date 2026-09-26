@@ -9,7 +9,6 @@ from pathlib import Path
 
 from config_manager import ConfigManager
 
-
 CALIBRATION_PHRASES = {
     "copy": "copy that",
     "paste": "paste that",
@@ -66,6 +65,13 @@ class VoiceCalibrator:
 
     @staticmethod
     def _parse_event(line):
+        """Return ``(kind, canonical, confidence, spoken)`` or None.
+
+        ``kind`` is the raw protocol line kind. ``DEBUG_REJECTED`` entries are
+        diagnostics — Windows matched the phrase but refused it — so the
+        callers report them and never count them as captured samples or as
+        false candidates, matching how voice_validate.py scores them.
+        """
         if line.strip().startswith("VOICE_TEXT2:"):
             parts = line.strip().split(":", 2)
             if len(parts) != 3:
@@ -80,7 +86,7 @@ class VoiceCalibrator:
             spoken = spoken.strip().lower()
             if not 0.0 <= conf <= 1.0 or not spoken:
                 return None
-            return spoken.replace(" ", "_"), conf, spoken
+            return "VOICE_TEXT", spoken.replace(" ", "_"), conf, spoken
 
         if line.strip().startswith("VOICE_TEXT:"):
             parts = line.strip().split(":", 2)
@@ -93,10 +99,10 @@ class VoiceCalibrator:
             spoken = parts[2].strip().lower()
             if not 0.0 <= conf <= 1.0 or not spoken:
                 return None
-            return spoken.replace(" ", "_"), conf, spoken
+            return "VOICE_TEXT", spoken.replace(" ", "_"), conf, spoken
 
         parts = line.strip().split(":", 3)
-        if len(parts) < 3 or parts[0] not in ("VOICE_CMD", "DEBUG_LOW_CONF"):
+        if len(parts) < 3 or parts[0] not in ("VOICE_CMD", "DEBUG_LOW_CONF", "DEBUG_REJECTED"):
             return None
         try:
             conf = float(parts[2].replace(",", "."))
@@ -104,7 +110,9 @@ class VoiceCalibrator:
             return None
         if not 0.0 <= conf <= 1.0:
             return None
-        return parts[1].strip().lower(), conf, parts[3].strip().lower() if len(parts) >= 4 else parts[1].strip().lower()
+        canonical = parts[1].strip().lower()
+        spoken = parts[3].strip().lower() if len(parts) >= 4 else canonical
+        return parts[0], canonical, conf, spoken
 
     @staticmethod
     def _reader_thread(stream, out_queue):
@@ -220,7 +228,13 @@ class VoiceCalibrator:
                 event = self._parse_event(line)
                 if not event:
                     continue
-                canonical, conf, spoken = event
+                kind, canonical, conf, spoken = event
+                if kind == "DEBUG_REJECTED":
+                    # Refused by Windows after a grammar match: shown for
+                    # diagnostics only. Counting it as a captured sample would
+                    # drag the chosen confidence threshold downwards.
+                    print(f"  ✗ Windows rejected '{spoken}' as {canonical} ({conf*100:.0f}%)")
+                    continue
                 if canonical == command_name or command_name in spoken:
                     samples.append(conf)
                     play_beep(True)
@@ -258,7 +272,12 @@ class VoiceCalibrator:
                     break
                 event = self._parse_event(line)
                 if event:
-                    canonical, conf, spoken = event
+                    kind, canonical, conf, spoken = event
+                    if kind == "DEBUG_REJECTED":
+                        # Declined by Windows: reported, but not a false
+                        # candidate — the engine already refused it.
+                        print(f"  · rejected '{spoken}' ({conf*100:.0f}%)")
+                        continue
                     negatives.append(conf)
                     print(f"  ! false candidate: '{spoken}' -> {canonical} ({conf*100:.1f}%)")
         finally:

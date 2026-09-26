@@ -21,7 +21,7 @@ from unittest import mock
 
 import voice_calibrate
 import voice_validate
-from config_manager import ConfigManager, DEFAULT_CONFIG
+from config_manager import DEFAULT_CONFIG, ConfigManager
 from voice_detector import VOICE_COMMANDS, VoiceDetector
 
 
