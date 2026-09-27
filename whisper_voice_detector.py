@@ -321,7 +321,10 @@ class WhisperVoiceDetector:
             )
             self._input_rate = self._sample_rate
         except Exception:
-            info = sd.query_devices(kind="input")
+            try:
+                info = sd.query_devices(device, "input") if device is not None else sd.query_devices(kind="input")
+            except Exception:
+                info = sd.query_devices(kind="input")
             self._input_rate = int(float(info.get("default_samplerate", 16000)))
             blocksize = max(1, int(self._input_rate * self.FRAME_MS / 1000))
             try:
@@ -332,6 +335,12 @@ class WhisperVoiceDetector:
             except Exception:
                 # A stale device index should not prevent Voice Mode from
                 # using the current default microphone.
+                try:
+                    default_info = sd.query_devices(kind="input")
+                    self._input_rate = int(float(default_info.get("default_samplerate", 16000)))
+                    blocksize = max(1, int(self._input_rate * self.FRAME_MS / 1000))
+                except Exception:
+                    pass
                 stream = sd.InputStream(
                     samplerate=self._input_rate, channels=1, dtype="float32",
                     blocksize=blocksize, callback=self._audio_callback,
@@ -438,8 +447,8 @@ class WhisperVoiceDetector:
             if speech:
                 silence_ms = 0
             else:
-                silence_ms += self.FRAME_MS
-            elapsed_ms = len(utterance) * self.FRAME_MS
+                silence_ms += int(len(frame) * 1000 / self._input_rate) if self._input_rate > 0 else self.FRAME_MS
+            elapsed_ms = int(sum(len(f) for f in utterance) * 1000 / self._input_rate) if self._input_rate > 0 else len(utterance) * self.FRAME_MS
             if silence_ms >= self.END_SILENCE_MS or elapsed_ms >= self.MAX_UTTERANCE_MS:
                 if elapsed_ms - silence_ms >= self.MIN_UTTERANCE_MS:
                     audio = np.concatenate(utterance).astype(np.float32, copy=False)
@@ -456,12 +465,19 @@ class WhisperVoiceDetector:
     def _prepare_audio(self, audio):
         if self._input_rate == self._sample_rate:
             return audio
-        from scipy.signal import resample_poly
-        divisor = math.gcd(self._input_rate, self._sample_rate)
-        return np.asarray(
-            resample_poly(audio, self._sample_rate // divisor, self._input_rate // divisor),
-            dtype=np.float32,
-        )
+        try:
+            from scipy.signal import resample_poly
+            divisor = math.gcd(self._input_rate, self._sample_rate)
+            return np.asarray(
+                resample_poly(audio, self._sample_rate // divisor, self._input_rate // divisor),
+                dtype=np.float32,
+            )
+        except Exception:
+            duration = len(audio) / max(1, self._input_rate)
+            target_samples = int(duration * self._sample_rate)
+            orig_indices = np.linspace(0, duration, len(audio), endpoint=False)
+            target_indices = np.linspace(0, duration, target_samples, endpoint=False)
+            return np.interp(target_indices, orig_indices, audio).astype(np.float32)
 
     def _run_transcriber(self, session_id):
         while session_id == self._session_id and not self._stop_event.is_set():
@@ -574,3 +590,8 @@ class WhisperVoiceDetector:
             self.is_running = False
             self._stopping = False
             self._set_state("stopped", "Whisper voice engine stopped.")
+
+    def cleanup(self):
+        """Release all resources and unsubscribe from config changes."""
+        self.stop()
+        self.config_manager.remove_listener(self._on_config_changed)

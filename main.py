@@ -130,7 +130,10 @@ def run_cli_mode(config, executor, detector, audio, voice, verifier):
         print("\n[CLI] Stopping engines...")
     finally:
         audio.stop()
-        voice.stop()
+        if hasattr(voice, "cleanup"):
+            voice.cleanup()
+        else:
+            voice.stop()
         detector.stop()
         verifier.shutdown()
         config.flush()
@@ -182,6 +185,14 @@ def main():
         print("[Voice] Windows Speech helper is unavailable; falling back to local Whisper.")
         config.set("voice_backend", "whisper")
         voice_backend = "whisper"
+    elif voice_backend == "whisper":
+        try:
+            import faster_whisper  # noqa: F401
+        except Exception:
+            if sys.platform == "win32" and (Path(__file__).parent / "VoiceRecognizerV1M.exe").exists():
+                print("[Voice] faster-whisper is not installed; falling back to Windows Speech helper.")
+                config.set("voice_backend", "windows")
+                voice_backend = "windows"
     voice_class = WhisperVoiceDetector if voice_backend == "whisper" else VoiceDetector
     voice = voice_class(config_manager=config)
     # Cloud guardrail for voice commands: no-ops (offline fallback) unless the
@@ -198,8 +209,9 @@ def main():
         config, audio, detector, executor,
         voice_detector=voice, voice_verifier=verifier,
     )
+    voice_cleanup = getattr(voice, "cleanup", voice.stop)
     app.aboutToQuit.connect(audio.stop)
-    app.aboutToQuit.connect(voice.stop)
+    app.aboutToQuit.connect(voice_cleanup)
     app.aboutToQuit.connect(detector.stop)
     app.aboutToQuit.connect(verifier.shutdown)
     app.aboutToQuit.connect(config.flush)

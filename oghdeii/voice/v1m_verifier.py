@@ -623,11 +623,11 @@ class V1MVoiceVerifier:
 
         Returns ``(ok, human_readable_detail)`` and never raises.
         """
-        if not sdk_available():
-            return False, f"typesafe-sdk is not installed ({SDK_IMPORT_ERROR})"
         key = self.api_key()
         if not key:
             return False, "No API key. Set V1M_API_KEY or paste one below."
+        if not sdk_available():
+            return False, f"typesafe-sdk is not installed ({SDK_IMPORT_ERROR})"
         timeout_s = float(timeout) if timeout else max(5.0, self._request_timeout_s())
         started = time.monotonic()
         client = None

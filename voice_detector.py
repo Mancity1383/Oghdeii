@@ -18,10 +18,11 @@ _VOICE_PHRASE_COMMANDS = {
     "paste": "paste", "paste that": "paste", "paste this": "paste",
     "screenshot": "screenshot", "take screenshot": "screenshot",
     "take a screenshot": "screenshot",
-    "lock pc": "lock", "lock screen": "lock", "lock computer": "lock",
+    "lock": "lock", "lock pc": "lock", "lock screen": "lock", "lock computer": "lock",
     "undo": "undo", "undo that": "undo", "redo": "redo",
     "select all": "select_all",
     "desktop": "show_desktop", "show desktop": "show_desktop",
+    "show the desktop": "show_desktop",
     "calculator": "open_calculator", "open calculator": "open_calculator",
     "notepad": "open_notepad", "open notepad": "open_notepad",
     "browser": "open_browser", "open browser": "open_browser",
@@ -32,7 +33,8 @@ _VOICE_PHRASE_COMMANDS = {
     "next": "next", "next track": "next",
     "previous": "previous", "previous track": "previous",
     "mute": "mute", "mute sound": "mute",
-    "volume up": "volume_up", "volume down": "volume_down",
+    "volume up": "volume_up", "turn volume up": "volume_up",
+    "volume down": "volume_down", "turn volume down": "volume_down",
 }
 
 
@@ -703,3 +705,8 @@ class VoiceDetector:
                 except Exception:
                     pass
         self._set_state("stopped", "Voice engine stopped.")
+
+    def cleanup(self):
+        """Release all resources and unsubscribe from config changes."""
+        self.stop()
+        self.config_manager.remove_listener(self._on_config_changed)

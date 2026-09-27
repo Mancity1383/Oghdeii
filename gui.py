@@ -1305,7 +1305,10 @@ class MainWindow(QMainWindow):
         from voice_detector import VoiceDetector
         from whisper_voice_detector import WhisperVoiceDetector
         if self.voice_detector:
-            self.voice_detector.stop()
+            if hasattr(self.voice_detector, "cleanup"):
+                self.voice_detector.cleanup()
+            else:
+                self.voice_detector.stop()
         self.config.set("voice_backend", backend)
         detector_type = WhisperVoiceDetector if backend == "whisper" else VoiceDetector
         self.voice_detector = detector_type(self.config)

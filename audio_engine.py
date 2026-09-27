@@ -1,5 +1,4 @@
 import queue
-import queue
 import threading
 
 import numpy as np
