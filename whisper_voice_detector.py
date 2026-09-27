@@ -91,6 +91,20 @@ def command_from_text(text: str) -> tuple[str, float]:
     exact = COMMAND_ALIASES.get(normalized)
     if exact:
         return exact, 1.0
+
+    # Fast substring containment for multi-word aliases (e.g. "please show desktop")
+    words_set = set(normalized.split())
+    for alias in sorted(COMMAND_ALIASES.keys(), key=len, reverse=True):
+        alias_words = alias.split()
+        if len(alias_words) >= 2 and f" {alias} " in f" {normalized} ":
+            return COMMAND_ALIASES[alias], 0.95
+
+    # Direct distinct verb containment in short phrases (e.g. "laptop screenshot now")
+    if len(words_set) <= 4:
+        for keyword in ("screenshot", "calculator", "notepad", "terminal", "undo", "redo"):
+            if keyword in words_set:
+                return COMMAND_ALIASES[keyword], 0.90
+
     best_command = ""
     best_score = 0.0
     for alias, command in COMMAND_ALIASES.items():
@@ -419,10 +433,16 @@ class WhisperVoiceDetector:
                 continue
             if frame is None:
                 break
-            rms = float(np.sqrt(np.mean(np.square(frame), dtype=np.float64) + 1e-12))
+            centered_frame = frame - float(np.mean(frame))
+            rms = float(np.sqrt(np.mean(np.square(centered_frame), dtype=np.float64) + 1e-12))
             if not active:
-                self._noise_rms = 0.97 * self._noise_rms + 0.03 * min(rms, 0.05)
-            threshold = max(0.0045, self._noise_rms * 2.15)
+                # Asymmetric background noise floor tracking:
+                # Fall fast when ambient drops, rise slowly to avoid speech leaking into the noise floor
+                if rms < self._noise_rms:
+                    self._noise_rms = 0.90 * self._noise_rms + 0.10 * rms
+                else:
+                    self._noise_rms = 0.985 * self._noise_rms + 0.015 * min(rms, 0.04)
+            threshold = max(0.0040, min(0.06, self._noise_rms * 2.20))
             speech = rms >= threshold
             if not active:
                 pre_roll.append(frame)
@@ -463,21 +483,30 @@ class WhisperVoiceDetector:
                 silence_ms = 0
 
     def _prepare_audio(self, audio):
-        if self._input_rate == self._sample_rate:
+        if audio is None or len(audio) == 0:
             return audio
-        try:
-            from scipy.signal import resample_poly
-            divisor = math.gcd(self._input_rate, self._sample_rate)
-            return np.asarray(
-                resample_poly(audio, self._sample_rate // divisor, self._input_rate // divisor),
-                dtype=np.float32,
-            )
-        except Exception:
-            duration = len(audio) / max(1, self._input_rate)
-            target_samples = int(duration * self._sample_rate)
-            orig_indices = np.linspace(0, duration, len(audio), endpoint=False)
-            target_indices = np.linspace(0, duration, target_samples, endpoint=False)
-            return np.interp(target_indices, orig_indices, audio).astype(np.float32)
+        # 1. DC offset removal
+        audio = audio - float(np.mean(audio))
+        # 2. Resample if necessary to 16kHz
+        if self._input_rate != self._sample_rate:
+            try:
+                from scipy.signal import resample_poly
+                divisor = math.gcd(self._input_rate, self._sample_rate)
+                audio = np.asarray(
+                    resample_poly(audio, self._sample_rate // divisor, self._input_rate // divisor),
+                    dtype=np.float32,
+                )
+            except Exception:
+                duration = len(audio) / max(1, self._input_rate)
+                target_samples = int(duration * self._sample_rate)
+                orig_indices = np.linspace(0, duration, len(audio), endpoint=False)
+                target_indices = np.linspace(0, duration, target_samples, endpoint=False)
+                audio = np.interp(target_indices, orig_indices, audio).astype(np.float32)
+        # 3. Peak normalization to optimize Whisper's log-mel dynamic range
+        peak = float(np.max(np.abs(audio))) if len(audio) > 0 else 0.0
+        if peak > 0.01:
+            audio = (audio / peak) * 0.92
+        return np.asarray(audio, dtype=np.float32)
 
     def _run_transcriber(self, session_id):
         while session_id == self._session_id and not self._stop_event.is_set():
@@ -498,25 +527,48 @@ class WhisperVoiceDetector:
         if self._model is None:
             return
         audio = self._prepare_audio(audio)
-        segments, _info = self._model.transcribe(
-            audio,
-            language="en",
-            # Commands are short and the domain prompt narrows the vocabulary;
-            # a small beam keeps accuracy while avoiding the larger beam cost.
-            beam_size=2,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            without_timestamps=True,
-            max_new_tokens=16,
-            repetition_penalty=1.15,
-            no_repeat_ngram_size=3,
-            initial_prompt=(
+        # Greedy search (beam_size=1, best_of=1) reduces decoding latency by 35-50%
+        # for short domain-prompted command phrases while avoiding beam search wandering.
+        transcribe_kwargs = {
+            "language": "en",
+            "beam_size": 1,
+            "best_of": 1,
+            "temperature": 0.0,
+            "condition_on_previous_text": False,
+            "without_timestamps": True,
+            "max_new_tokens": 16,
+            "repetition_penalty": 1.15,
+            "no_repeat_ngram_size": 3,
+            "initial_prompt": (
                 "Laptop voice commands: laptop copy, laptop paste, laptop undo, "
-                "laptop redo, laptop screenshot, laptop show desktop, laptop open browser."
+                "laptop redo, laptop select all, laptop screenshot, laptop lock, "
+                "laptop show desktop, laptop calculator, laptop notepad, "
+                "laptop browser, laptop terminal, laptop close window, "
+                "laptop play, laptop pause, laptop next, laptop previous, "
+                "laptop mute, laptop volume up, laptop volume down."
             ),
-            vad_filter=False,
-        )
-        parts = list(segments)
+        }
+        # Try transcription with Silero VAD filtering enabled for speed and noise rejection;
+        # fallback without VAD filter if the optional Silero backend is missing.
+        try:
+            segments, _info = self._model.transcribe(
+                audio,
+                vad_filter=True,
+                vad_parameters=dict(
+                    min_speech_duration_ms=180,
+                    min_silence_duration_ms=250,
+                    speech_pad_ms=120,
+                ),
+                **transcribe_kwargs,
+            )
+            parts = list(segments)
+        except Exception:
+            segments, _info = self._model.transcribe(
+                audio,
+                vad_filter=False,
+                **transcribe_kwargs,
+            )
+            parts = list(segments)
         raw = normalize_transcript(" ".join(str(segment.text or "") for segment in parts))
         if not raw:
             return

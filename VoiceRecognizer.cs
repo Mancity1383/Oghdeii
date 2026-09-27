@@ -76,9 +76,9 @@ namespace LaptopTap
                     "copy", "copy that", "copy this",
                     "paste", "paste that", "paste this",
                     "screenshot", "take screenshot", "take a screenshot",
-                    "lock pc", "lock screen", "lock computer",
+                    "lock", "lock pc", "lock screen", "lock computer",
                     "undo", "undo that", "redo", "select all",
-                    "desktop", "show desktop",
+                    "desktop", "show desktop", "show the desktop",
                     "calculator", "open calculator",
                     "notepad", "open notepad",
                     "browser", "open browser",
@@ -86,7 +86,9 @@ namespace LaptopTap
                     "close window", "close app",
                     "play", "play music", "pause", "pause music",
                     "next", "next track", "previous", "previous track",
-                    "mute", "mute sound", "volume up", "volume down"
+                    "mute", "mute sound",
+                    "volume up", "turn volume up",
+                    "volume down", "turn volume down"
                 };
                 string[] commandPhrases;
                 if (requireWakeWord)
@@ -114,8 +116,10 @@ namespace LaptopTap
 
                 // End the utterance after a brief pause, while allowing a
                 // natural gap between the wake phrase and the command.
-                engine.EndSilenceTimeout = TimeSpan.FromMilliseconds(450);
-                engine.EndSilenceTimeoutAmbiguous = TimeSpan.FromMilliseconds(800);
+                engine.InitialSilenceTimeout = TimeSpan.FromMilliseconds(0);
+                engine.BabbleTimeout = TimeSpan.FromMilliseconds(0);
+                engine.EndSilenceTimeout = TimeSpan.FromMilliseconds(400);
+                engine.EndSilenceTimeoutAmbiguous = TimeSpan.FromMilliseconds(550);
 
                 engine.SpeechDetected += (s, e) =>
                 {
