@@ -117,6 +117,12 @@ namespace LaptopTap
                 engine.EndSilenceTimeout = TimeSpan.FromMilliseconds(450);
                 engine.EndSilenceTimeoutAmbiguous = TimeSpan.FromMilliseconds(800);
 
+                engine.SpeechDetected += (s, e) =>
+                {
+                    Console.WriteLine("SPEECH_ACTIVE");
+                    Console.Out.Flush();
+                };
+
                 string lastTranscript = null;
                 DateTime lastAcceptedAt = DateTime.MinValue;
                 object debounceLock = new object();

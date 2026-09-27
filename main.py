@@ -178,6 +178,10 @@ def main():
 
     audio.on_audio_chunk = handle_audio_chunk
     voice_backend = config.get("voice_backend", "whisper")
+    if voice_backend == "windows" and sys.platform != "win32":
+        print("[Voice] Windows Speech helper is unavailable; falling back to local Whisper.")
+        config.set("voice_backend", "whisper")
+        voice_backend = "whisper"
     voice_class = WhisperVoiceDetector if voice_backend == "whisper" else VoiceDetector
     voice = voice_class(config_manager=config)
     # Cloud guardrail for voice commands: no-ops (offline fallback) unless the

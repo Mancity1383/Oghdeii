@@ -143,10 +143,16 @@ class WhisperVoiceDetector:
         self.config_manager = config_manager
         self.on_voice_command = on_voice_command
         self.on_status_change = on_status_change
+        self.on_speech_active = None
         self.state = "stopped"
         self.last_error = None
         self.is_running = False
         self._stop_event = threading.Event()
+        self._lifecycle_lock = threading.RLock()
+        self._session_id = 0
+        self._stopping = False
+        self._config_stop_requested = threading.Event()
+        self._last_config_notice = 0.0
         self._startup_event = threading.Event()
         self._frame_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=120)
         self._utterance_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=8)
@@ -187,11 +193,16 @@ class WhisperVoiceDetector:
             not self.is_enabled
             or self.config_manager.get("active_mode", "knock") != "voice"
         ):
-            self.stop()
+            # Config listeners may run on the DSP worker. Ask the capture
+            # owner to stop; never join audio/transcription threads inline.
+            self._config_stop_requested.set()
             return
         if self._input_snapshot() != self._opened_input_snapshot:
             self._stream_restart_event.set()
-            self._set_state("starting", "Switching the voice microphone…")
+            now = time.monotonic()
+            if now - self._last_config_notice > 0.5:
+                self._last_config_notice = now
+                self._set_state("starting", "Switching the voice microphone…")
 
     def _input_snapshot(self):
         return (
@@ -208,35 +219,40 @@ class WhisperVoiceDetector:
         return device, compute
 
     def start(self):
-        if self.is_running:
+        with self._lifecycle_lock:
+            if self._stopping:
+                return False
+            if self.is_running:
+                return True
+            for thread in (self._thread, self._transcribe_thread):
+                if thread is not None and thread.is_alive():
+                    return False
+            if not self.is_enabled:
+                self._set_state("error", "Voice commands are disabled in settings.")
+                return False
+            self._session_id += 1
+            session_id = self._session_id
+            self._stop_event = threading.Event()
+            self._config_stop_requested.clear()
+            self._stream_restart_event.clear()
+            self._startup_event.clear()
+            self.last_error = None
+            for pending_queue in (self._frame_queue, self._utterance_queue):
+                while True:
+                    try:
+                        pending_queue.get_nowait()
+                    except queue.Empty:
+                        break
+            self.is_running = True
+            self._set_state("starting", "Loading local faster-whisper model…")
+            self._thread = threading.Thread(target=self._run_capture, args=(session_id,), name="WhisperVoiceCapture", daemon=True)
+            self._transcribe_thread = threading.Thread(
+                target=self._run_transcriber, args=(session_id,),
+                name="WhisperVoiceTranscriber", daemon=True,
+            )
+            self._thread.start()
+            self._transcribe_thread.start()
             return True
-        if not self.is_enabled:
-            self._set_state("error", "Voice commands are disabled in settings.")
-            return False
-        if os.name != "nt":
-            self._set_state("error", "Whisper voice mode is currently configured for Windows.")
-            return False
-        self._stop_event.clear()
-        self._stream_restart_event.clear()
-        self._startup_event.clear()
-        self.last_error = None
-        for pending_queue in (self._frame_queue, self._utterance_queue):
-            while True:
-                try:
-                    pending_queue.get_nowait()
-                except queue.Empty:
-                    break
-        self.is_running = True
-        self._set_state("starting", "Loading local faster-whisper model…")
-        self._thread = threading.Thread(target=self._run_capture, name="WhisperVoiceCapture", daemon=True)
-        self._transcribe_thread = threading.Thread(
-            target=self._run_transcriber,
-            name="WhisperVoiceTranscriber",
-            daemon=True,
-        )
-        self._thread.start()
-        self._transcribe_thread.start()
-        return True
 
     def wait_until_ready(self, timeout_s=8.0):
         if self.state == "ready" and self.is_running:
@@ -244,7 +260,7 @@ class WhisperVoiceDetector:
         self._startup_event.wait(max(0.0, float(timeout_s)))
         return self.state == "ready" and self.is_running
 
-    def _run_capture(self):
+    def _run_capture(self, session_id):
         try:
             # Windows without Developer Mode cannot create Hugging Face's
             # cache symlinks. Downloads still work through regular copies;
@@ -275,9 +291,9 @@ class WhisperVoiceDetector:
             if self._stop_event.is_set():
                 return
             self._sounddevice = sd
-            self._open_stream(sd)
+            self._stream = self._open_stream(sd)
             self._set_state("ready", f"Local Whisper ready ({self._model_name()}; {compute_type}).")
-            self._capture_loop(sd)
+            self._capture_loop(sd, session_id)
         except Exception as exc:
             failed = True
             self.is_running = False
@@ -299,7 +315,7 @@ class WhisperVoiceDetector:
         device = self._opened_input_snapshot[0]
         stream_kwargs = {"device": device} if device is not None else {}
         try:
-            self._stream = sd.InputStream(
+            stream = sd.InputStream(
                 samplerate=self._sample_rate, channels=1, dtype="float32",
                 blocksize=blocksize, callback=self._audio_callback, **stream_kwargs,
             )
@@ -309,18 +325,19 @@ class WhisperVoiceDetector:
             self._input_rate = int(float(info.get("default_samplerate", 16000)))
             blocksize = max(1, int(self._input_rate * self.FRAME_MS / 1000))
             try:
-                self._stream = sd.InputStream(
+                stream = sd.InputStream(
                     samplerate=self._input_rate, channels=1, dtype="float32",
                     blocksize=blocksize, callback=self._audio_callback, **stream_kwargs,
                 )
             except Exception:
                 # A stale device index should not prevent Voice Mode from
                 # using the current default microphone.
-                self._stream = sd.InputStream(
+                stream = sd.InputStream(
                     samplerate=self._input_rate, channels=1, dtype="float32",
                     blocksize=blocksize, callback=self._audio_callback,
                 )
-        self._stream.start()
+        stream.start()
+        return stream
 
     def _close_stream(self):
         stream, self._stream = self._stream, None
@@ -350,28 +367,41 @@ class WhisperVoiceDetector:
             except (queue.Empty, queue.Full):
                 pass
 
-    def _capture_loop(self, sd):
+    def _capture_loop(self, sd, session_id):
         pre_roll = deque(maxlen=max(1, int(self.PRE_ROLL_MS / self.FRAME_MS)))
         utterance = []
         active = False
         silence_ms = 0
         speech_frames = 0
-        while not self._stop_event.is_set():
+        retry_delay = 0.25
+        while session_id == self._session_id and not self._stop_event.is_set():
+            if self._config_stop_requested.is_set():
+                self._stop_event.set()
+                break
             if self._stream_restart_event.is_set():
-                self._stream_restart_event.clear()
-                self._close_stream()
-                while True:
+                try:
+                    new_stream = self._open_stream(sd)
+                except Exception as exc:
+                    # Retain the current stream and retry in-place. Device
+                    # enumeration/config errors must not kill Voice Mode.
+                    self._set_state("starting", f"Microphone switch failed; retrying: {exc}")
+                    self._stop_event.wait(retry_delay)
+                    retry_delay = min(4.0, retry_delay * 2)
+                    continue
+                old_stream, self._stream = self._stream, new_stream
+                if old_stream is not None:
                     try:
-                        self._frame_queue.get_nowait()
-                    except queue.Empty:
-                        break
+                        old_stream.stop(); old_stream.close()
+                    except Exception:
+                        pass
+                retry_delay = 0.25
+                self._stream_restart_event.clear()
+                while True:
+                    try: self._frame_queue.get_nowait()
+                    except queue.Empty: break
                 self._noise_rms = 0.003
-                self._open_stream(sd)
-                active = False
-                utterance.clear()
-                pre_roll.clear()
-                speech_frames = 0
-                silence_ms = 0
+                active = False; utterance.clear(); pre_roll.clear()
+                speech_frames = 0; silence_ms = 0
                 self._set_state("ready", "Whisper voice recognition is running.")
                 continue
             try:
@@ -397,6 +427,12 @@ class WhisperVoiceDetector:
                     active = True
                     utterance = list(pre_roll)
                     silence_ms = 0
+                    speech_callback = getattr(self, "on_speech_active", None)
+                    if speech_callback:
+                        try:
+                            speech_callback(1.2)
+                        except Exception:
+                            pass
                 continue
             utterance.append(frame)
             if speech:
@@ -427,8 +463,8 @@ class WhisperVoiceDetector:
             dtype=np.float32,
         )
 
-    def _run_transcriber(self):
-        while not self._stop_event.is_set():
+    def _run_transcriber(self, session_id):
+        while session_id == self._session_id and not self._stop_event.is_set():
             try:
                 audio = self._utterance_queue.get(timeout=0.2)
             except queue.Empty:
@@ -477,6 +513,11 @@ class WhisperVoiceDetector:
         avg_logprob = sum(float(getattr(s, "avg_logprob", -1.5)) for s in parts) / max(1, len(parts))
         confidence = max(0.05, min(0.99, math.exp(min(0.0, avg_logprob))))
         command, similarity = command_from_text(raw)
+        if not command and not bool(
+            self.config_manager.get("enable_v1m_verification", False)
+        ):
+            # No local mapping is not a command candidate in offline mode.
+            return
         try:
             threshold = float(self.config_manager.get("voice_confidence_threshold", 0.55))
         except (TypeError, ValueError):
@@ -514,17 +555,22 @@ class WhisperVoiceDetector:
             return 0.65
 
     def stop(self):
-        self._stop_event.set()
-        self._close_stream()
-        for q in (self._frame_queue, self._utterance_queue):
-            try:
-                q.put_nowait(None)
-            except queue.Full:
-                pass
-        for thread in (self._thread, self._transcribe_thread):
-            if thread and thread.is_alive():
-                thread.join(timeout=2.0)
-        self._thread = None
-        self._transcribe_thread = None
-        self.is_running = False
-        self._set_state("stopped", "Whisper voice engine stopped.")
+        with self._lifecycle_lock:
+            self._stopping = True
+            self._session_id += 1
+            self._stop_event.set()
+            self._close_stream()
+            for q in (self._frame_queue, self._utterance_queue):
+                try: q.put_nowait(None)
+                except queue.Full: pass
+            threads = (self._thread, self._transcribe_thread)
+        # Never report stopped or permit another session while either worker
+        # can still touch this detector/model.
+        for thread in threads:
+            if thread and thread is not threading.current_thread():
+                thread.join()
+        with self._lifecycle_lock:
+            self._thread = self._transcribe_thread = None
+            self.is_running = False
+            self._stopping = False
+            self._set_state("stopped", "Whisper voice engine stopped.")

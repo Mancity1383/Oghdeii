@@ -1,4 +1,5 @@
 import queue
+import queue
 import threading
 
 import numpy as np
@@ -33,11 +34,13 @@ class AudioEngine:
         self._lock = threading.RLock()
         self._history_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._generation = 0
         self._audio_queue = queue.Queue(maxsize=12)
         self._worker_thread = None
         self.last_status = None
         self.last_callback_error = None
         self.last_start_error = None
+        self.last_device_change_error = None
         self.dropped_blocks = 0
         self.waveform_history_len = 1024
         self.waveform_history = np.zeros(self.waveform_history_len, dtype=np.float32)
@@ -203,6 +206,12 @@ class AudioEngine:
         with self._lock:
             if self.is_running:
                 return True
+            worker = self._worker_thread
+            if worker is not None and worker.is_alive():
+                # Never clear a stop signal while a previous worker can still
+                # be mutating the filter state or consuming this queue.
+                worker.join()
+            self._worker_thread = None
             self.last_start_error = None
             self.last_callback_error = None
             self.last_status = None
@@ -221,7 +230,9 @@ class AudioEngine:
                         round(actual_sr * self.warmup_seconds)
                     )
                     self._clear_audio_queue()
-                    self._stop_event.clear()
+                    self._generation += 1
+                    generation = self._generation
+                    self._stop_event = threading.Event()
                     self.stream = stream
                     self.is_running = True
                     self.active_device_index = dev_idx
@@ -231,6 +242,7 @@ class AudioEngine:
                     self.device_signature = self.active_device_signature
                     worker = threading.Thread(
                         target=self._worker_loop,
+                        args=(generation, self._stop_event),
                         name="OghdeiiAudioDSP",
                         daemon=True,
                     )
@@ -275,6 +287,8 @@ class AudioEngine:
             stream, self.stream = self.stream, None
             self.is_running = False
             self._stop_event.set()
+            self._generation += 1
+            worker, self._worker_thread = self._worker_thread, None
         if stream is not None:
             try:
                 stream.stop()
@@ -284,31 +298,35 @@ class AudioEngine:
                 stream.close()
             except Exception as exc:
                 print(f"[AudioEngine] Error closing audio stream: {exc}")
-        worker, self._worker_thread = self._worker_thread, None
         if worker is not None and worker is not threading.current_thread():
-            worker.join(timeout=1.0)
+            worker.join()
         self._clear_audio_queue()
         if stream is not None:
             print("[AudioEngine] Audio stream stopped.")
 
     def change_device(self, new_device_index, new_device_signature=None):
-        old_index = self.device_index
-        old_signature = self.device_signature
-        was_running = self.is_running
-        if was_running:
-            self.stop()
-        self.device_index = new_device_index
-        self.device_signature = new_device_signature
-        if not was_running:
-            return True
-        if self.start(allow_fallback=False):
-            return True
-        failure = self.last_start_error
-        self.device_index = old_index
-        self.device_signature = old_signature
-        self.start()
-        self.last_start_error = failure
-        return False
+        with self._lock:
+            self.last_device_change_error = None
+            old_index = self.device_index
+            old_signature = self.device_signature
+            was_running = self.is_running
+            if was_running:
+                self.stop()
+            self.device_index = new_device_index
+            self.device_signature = new_device_signature
+            if not was_running:
+                return True
+            if self.start(allow_fallback=False):
+                return True
+            failure = self.last_start_error
+            self.device_index = old_index
+            self.device_signature = old_signature
+            self.start()
+            # The selected device failed, but fallback capture may be healthy.
+            # Preserve the diagnostic separately from the active engine state.
+            self.last_device_change_error = failure
+            self.last_start_error = failure
+            return False
 
     def get_waveform_history(self):
         with self._history_lock:
@@ -337,8 +355,10 @@ class AudioEngine:
         except Exception as exc:
             self.last_callback_error = repr(exc)
 
-    def _worker_loop(self):
-        while not self._stop_event.is_set() or not self._audio_queue.empty():
+    def _worker_loop(self, generation, stop_event):
+        while generation == self._generation and (
+            not stop_event.is_set() or not self._audio_queue.empty()
+        ):
             try:
                 chunk = self._audio_queue.get(timeout=0.10)
             except queue.Empty:

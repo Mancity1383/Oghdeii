@@ -375,6 +375,7 @@ class TypingStateProbe:
         self._listener = None
         self._lock = threading.Lock()
         self._unavailable = False
+        self._stopped = False
 
     def __call__(self) -> bool:
         return self.is_active()
@@ -389,7 +390,7 @@ class TypingStateProbe:
 
     def start(self) -> bool:
         """Prime the keyboard hook early so the first command has context."""
-        if self._unavailable:
+        if self._unavailable or self._stopped:
             return False
         self._ensure_listener()
         return self._listener is not None
@@ -401,7 +402,7 @@ class TypingStateProbe:
 
     def _ensure_listener(self) -> None:
         with self._lock:
-            if self._unavailable or self._listener is not None:
+            if self._unavailable or self._stopped or self._listener is not None:
                 return
             factory = self._listener_factory
             if factory is None:
@@ -426,6 +427,7 @@ class TypingStateProbe:
 
     def stop(self) -> None:
         with self._lock:
+            self._stopped = True
             listener, self._listener = self._listener, None
         if listener is not None:
             try:
@@ -688,7 +690,9 @@ class V1MVoiceVerifier:
         """Release the worker pools, cached client and keyboard hook."""
         for pool in (self._executor, self._async_executor):
             try:
-                pool.shutdown(wait=False, cancel_futures=True)
+                # Let submitted verification calls finish before closing their
+                # shared HTTP client; queued verify_async futures must resolve.
+                pool.shutdown(wait=True, cancel_futures=False)
             except Exception:
                 pass
         with self._lock:

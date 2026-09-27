@@ -240,7 +240,9 @@ class ConfigManager:
             defaults = DEFAULT_CONFIG[group]
             values = cfg.get(group) if isinstance(cfg.get(group), dict) else {}
             cfg[group] = {
-                key: values.get(key) if values.get(key) in ALLOWED_ACTIONS else default
+                key: values.get(key)
+                if isinstance(values.get(key), str) and values.get(key) in ALLOWED_ACTIONS
+                else default
                 for key, default in defaults.items()
             }
         return cfg
@@ -469,6 +471,7 @@ class ConfigManager:
         """
         self.reload_if_changed()
         previous = self.config.get(key)
+        value = self._sanitize({**self.config, key: value}).get(key)
         self.config[key] = value
         self._dirty = True
         autostart_key = key in ("start_with_windows", "start_with_system")
@@ -495,7 +498,8 @@ class ConfigManager:
         if not isinstance(values, dict):
             raise TypeError("Config update must be a dictionary")
         self.reload_if_changed()
-        self.config.update(values)
+        sanitized = self._sanitize({**self.config, **values})
+        self.config.update({key: sanitized[key] for key in values})
         self._dirty = True
         if flush:
             saved = self.save()

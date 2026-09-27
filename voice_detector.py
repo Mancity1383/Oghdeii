@@ -86,6 +86,7 @@ class VoiceDetector:
         self.config_manager = config_manager
         self.on_voice_command = on_voice_command
         self.on_status_change = on_status_change
+        self.on_speech_active = None
         self.proc = None
         self.is_running = False
         self.state = "stopped"
@@ -403,6 +404,14 @@ class VoiceDetector:
         can never flip the new session's state or dispatch duplicate commands.
         """
         if not self._is_current(proc):
+            return
+        if line == "SPEECH_ACTIVE":
+            callback = self.on_speech_active
+            if callback:
+                try:
+                    callback(1.2)
+                except Exception as exc:
+                    print(f"[VoiceDetector] Speech-active callback error: {exc}")
             return
         parsed = self._parse_protocol_line(line)
         if parsed:
