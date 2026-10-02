@@ -54,6 +54,7 @@ class TranscriptClassificationTests(unittest.TestCase):
 class WhisperLifecycleTests(unittest.TestCase):
     def test_cleanup_unregisters_config_listener(self):
         import tempfile
+
         from config_manager import ConfigManager
         from whisper_voice_detector import WhisperVoiceDetector
 
@@ -66,6 +67,7 @@ class WhisperLifecycleTests(unittest.TestCase):
 
     def test_voice_detector_cleanup_unregisters_listener(self):
         import tempfile
+
         from config_manager import ConfigManager
         from voice_detector import VoiceDetector
 
@@ -77,8 +79,10 @@ class WhisperLifecycleTests(unittest.TestCase):
             self.assertNotIn(detector._on_config_changed, cm._listeners)
 
     def test_prepare_audio_resampling(self):
-        import numpy as np
         import tempfile
+
+        import numpy as np
+
         from config_manager import ConfigManager
         from whisper_voice_detector import WhisperVoiceDetector
 
@@ -92,6 +96,130 @@ class WhisperLifecycleTests(unittest.TestCase):
             resampled = detector._prepare_audio(audio_48k)
             # Should be approximately 16000 samples (1 second at 16kHz)
             self.assertEqual(len(resampled), 16000)
+            detector.cleanup()
+
+    def test_silero_empty_or_truncated_result_retries_without_vad(self):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        import numpy as np
+
+        from config_manager import ConfigManager
+        from whisper_voice_detector import WhisperVoiceDetector
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cm = ConfigManager(tmp)
+            detector = WhisperVoiceDetector(cm)
+            detector.is_running = True
+            output = []
+            detector.on_voice_command = lambda *args: output.append(args)
+            detected_command = SimpleNamespace(
+                text=" laptop copy ", avg_logprob=-0.1, no_speech_prob=0.0
+            )
+            # Simulate Silero first dropping the utterance completely, then
+            # returning only the wake word. The non-VAD retry recovers it.
+            detector._model = Mock()
+            detector._model.transcribe.side_effect = [
+                (iter(()), None),
+                (iter([detected_command]), None),
+            ]
+
+            detector._transcribe(np.ones(16000, dtype=np.float32) * 0.02)
+
+            self.assertEqual(len(output), 1)
+            self.assertEqual(output[0][0], "copy")
+            self.assertEqual(detector._model.transcribe.call_count, 2)
+            self.assertTrue(detector._model.transcribe.call_args_list[0].kwargs["vad_filter"])
+            self.assertFalse(detector._model.transcribe.call_args_list[1].kwargs["vad_filter"])
+            detector.cleanup()
+
+    def test_silero_wake_word_only_retries_to_recover_action(self):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        import numpy as np
+
+        from config_manager import ConfigManager
+        from whisper_voice_detector import WhisperVoiceDetector
+
+        with tempfile.TemporaryDirectory() as tmp:
+            detector = WhisperVoiceDetector(ConfigManager(tmp))
+            detector.is_running = True
+            output = []
+            detector.on_voice_command = lambda *args: output.append(args)
+            wake_only = SimpleNamespace(
+                text=" laptop ", avg_logprob=-0.1, no_speech_prob=0.0
+            )
+            full_command = SimpleNamespace(
+                text=" laptop copy ", avg_logprob=-0.1, no_speech_prob=0.0
+            )
+            detector._model = Mock()
+            detector._model.transcribe.side_effect = [
+                (iter([wake_only]), None),
+                (iter([full_command]), None),
+            ]
+
+            detector._transcribe(np.ones(16000, dtype=np.float32) * 0.02)
+
+            self.assertEqual(len(output), 1)
+            self.assertEqual(output[0][0], "copy")
+            self.assertEqual(detector._model.transcribe.call_count, 2)
+            detector.cleanup()
+
+    def test_input_stream_silent_device_falls_back_to_system_default(self):
+        import tempfile
+        from unittest.mock import Mock
+
+        import numpy as np
+
+        from config_manager import ConfigManager
+        from whisper_voice_detector import WhisperVoiceDetector
+
+        class Stream:
+            def __init__(self, callback, device):
+                self.callback = callback
+                self.device = device
+                self.active = False
+                self.closed = False
+
+            def start(self):
+                if self.device is None:
+                    self.callback(np.zeros((320, 1), dtype=np.float32), 320, None, None)
+                    self.active = True
+
+            def stop(self):
+                self.active = False
+
+            def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cm = ConfigManager(tmp)
+            cm.update({
+                "selected_input_device": 42,
+                "selected_input_device_signature": "inactive-device",
+            })
+            detector = WhisperVoiceDetector(cm)
+            sd = Mock()
+            sd.query_devices.side_effect = lambda *args, **kwargs: {
+                "default_samplerate": 16000
+            }
+            opened = []
+
+            def input_stream(**kwargs):
+                stream = Stream(kwargs["callback"], kwargs.get("device"))
+                opened.append(stream)
+                return stream
+
+            sd.InputStream.side_effect = input_stream
+            stream = detector._open_stream(sd)
+
+            self.assertIs(stream, opened[-1])
+            self.assertTrue(detector._using_default_input_fallback)
+            self.assertTrue(opened[0].closed)
+            self.assertIsNone(stream.device)
             detector.cleanup()
 
 

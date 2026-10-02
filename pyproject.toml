@@ -29,9 +29,25 @@ dev = [
     "ruff>=0.8,<1",
 ]
 build = ["pyinstaller>=6,<7"]
-# Convenience alias: `pip install .[cloud]` for a headless/text-only install
-# that skips PyQt6 but keeps the v1m guardrail.
+# Compatibility alias; base desktop dependencies are still installed.
 cloud = ["typesafe-sdk>=0.7,<1"]
+
+[project.scripts]
+oghdeii = "main:main"
+
+[tool.setuptools]
+py-modules = [
+    "main", "gui", "config_manager", "action_executor", "audio_engine",
+    "tap_detector", "voice_detector", "whisper_voice_detector",
+    "calibrate", "voice_calibrate", "tap_validate", "voice_validate",
+]
+
+[tool.setuptools.packages.find]
+include = ["oghdeii*"]
+
+[tool.setuptools.data-files]
+"share/oghdeii" = ["VoiceRecognizerV1M.exe"]
+"share/oghdeii/assets" = ["assets/icon.png", "assets/icon.ico"]
 
 [tool.mypy]
 # Third-party runtime dependencies that ship no type information; typesafe_sdk

@@ -70,3 +70,28 @@ py -3.12 -m venv .venv
 ## ساختار مخزن
 
 مخزن شامل سورس، تست‌ها و آیکون‌هاست. پوشه‌ی محیط مجازی، خروجی‌های build، مدل‌های cache‌شده، گزارش‌های محلی، cacheها و اسکریپت‌های نصب/لانچر در Git قرار نمی‌گیرند. برای نگه‌داشتن helper قدیمی Windows Speech می‌توان `voice_backend` را در تنظیمات محلی روی `windows` گذاشت؛ مقدار پیش‌فرض `whisper` است.
+
+## Development and package installation
+
+Install the project and its development checks in a virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install ".[dev]"
+.\.venv\Scripts\oghdeii.exe --help
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m mypy main.py gui.py action_executor.py audio_engine.py config_manager.py tap_detector.py voice_detector.py whisper_voice_detector.py oghdeii
+```
+
+The `oghdeii` command supports `--cli` and `--minimized`. The package includes
+the application modules, icons, and Windows speech helper. The `cloud` extra is
+a compatibility alias and still installs the desktop dependencies, including Qt.
+
+Automated tests mock microphones, cloud requests, and operating-system shortcuts.
+The GUI regression tests use Qt's offscreen platform. Real microphone accuracy,
+desktop shortcuts, and tray behavior require an interactive hardware check.
+Voice calibration currently uses the legacy Windows Speech helper; it does not
+calibrate the Whisper model. Calibration launchers require a source or Python
+package installation on Windows and are unavailable in the standalone EXE.
+
+See [PROJECT_REVIEW.md](PROJECT_REVIEW.md) for the review, fixes, and remaining improvements.

@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 
 from action_executor import resolve_gesture_action, resolve_voice_action
 from audio_engine import AudioEngine
+from oghdeii.resources import resource_path
 from tap_detector import DetectedTapGesture
 
 ACTION_LABELS = {
@@ -224,10 +225,10 @@ class WaveformWidget(QWidget):
 
 
 class SignalBridge(QObject):
-    gesture_signal = pyqtSignal(object)
+    gesture_signal = pyqtSignal(object, int)
     level_signal = pyqtSignal(float, float)
     # (command to resolve, recogniser confidence, spoken text, v1m decision|None)
-    voice_signal = pyqtSignal(str, float, str, object)
+    voice_signal = pyqtSignal(str, float, str, object, int)
     # Emitted when the v1m guardrail vetoed a phrase (never executes).
     voice_reject_signal = pyqtSignal(object)
     voice_status_signal = pyqtSignal(str, str)
@@ -247,6 +248,9 @@ class MainWindow(QMainWindow):
         self.executor = action_executor
         self.voice_detector = voice_detector
         self.voice_verifier = voice_verifier
+        self._dispatch_generation = 0
+        self._closing = False
+        self._calibrating = False
 
         self.bridge = SignalBridge()
         self.bridge.gesture_signal.connect(self.on_gesture_received)
@@ -264,9 +268,12 @@ class MainWindow(QMainWindow):
         # external processes (calibrate.py / voice_calibrate.py rewrite
         # config.json). The listener may fire on the audio worker thread, so it
         # only emits a Qt signal; the slot runs on the GUI thread.
-        self.config.add_listener(lambda: self.bridge.config_signal.emit())
+        self._config_listener = lambda: self.bridge.config_signal.emit()
+        self.config.add_listener(self._config_listener)
 
-        self.tap_detector.on_gesture_detected = lambda g: self.bridge.gesture_signal.emit(g)
+        self.tap_detector.on_gesture_detected = (
+            lambda g: self.bridge.gesture_signal.emit(g, self._dispatch_generation)
+        )
         self.tap_detector.on_level_update = lambda p, t: self.bridge.level_signal.emit(p, t)
         if self.voice_detector:
             # The v1m gate runs HERE, on the recogniser's reader thread, before
@@ -297,8 +304,7 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("عقده ای — میانبرهای ضربه و صدا")
-        from pathlib import Path
-        icon_path = Path(__file__).parent / "assets" / "icon.png"
+        icon_path = resource_path("assets/icon.png")
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(640, 720)
@@ -953,6 +959,9 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(footer_layout)
 
     def switch_mode(self, mode: str):
+        if self._closing or self._calibrating:
+            return
+        self._dispatch_generation += 1
         if mode not in ("knock", "voice"):
             mode = "knock"
         if self.config.get("active_mode") != mode:
@@ -991,7 +1000,8 @@ class MainWindow(QMainWindow):
 
             if self.voice_detector and self.voice_detector.is_running:
                 self.voice_detector.stop()
-            self.tap_detector.start()
+            if not self.is_monitoring_paused:
+                self.tap_detector.start()
             if not self.is_monitoring_paused and not self.audio_engine.is_running:
                 if self.audio_engine.start():
                     self._sync_active_microphone()
@@ -1286,6 +1296,7 @@ class MainWindow(QMainWindow):
             return
         self.config.set(key, value)
         if self.config.get("active_mode", "knock") == "voice" and self.config.get("voice_backend") == "whisper":
+            self._dispatch_generation += 1
             if self.voice_detector:
                 self.voice_detector.stop()
                 if not self.is_monitoring_paused and not self.voice_detector.start():
@@ -1304,6 +1315,7 @@ class MainWindow(QMainWindow):
             self.event_badge.setText("Windows Speech is unavailable here; using local Whisper.")
         from voice_detector import VoiceDetector
         from whisper_voice_detector import WhisperVoiceDetector
+        self._dispatch_generation += 1
         if self.voice_detector:
             if hasattr(self.voice_detector, "cleanup"):
                 self.voice_detector.cleanup()
@@ -1526,8 +1538,11 @@ class MainWindow(QMainWindow):
             return
         if state == "ready":
             self._set_status_badge("● Voice Mode Active", "#c084fc", "#261238")
-            wake = "Laptop Copy" if self.config.get("voice_require_wake_word", True) else "Copy"
-            self.event_badge.setText(f"Listening for speech. Try saying '{wake}'.")
+            if "using the system default microphone" in str(message).lower():
+                self.event_badge.setText(message)
+            else:
+                wake = "Laptop Copy" if self.config.get("voice_require_wake_word", True) else "Copy"
+                self.event_badge.setText(f"Listening for speech. Try saying '{wake}'.")
         elif state == "starting":
             self._set_status_badge("● Starting Voice Mode…", "#c084fc", "#261238")
         elif state == "error":
@@ -1536,8 +1551,7 @@ class MainWindow(QMainWindow):
     def init_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
 
-        from pathlib import Path
-        icon_path = Path(__file__).parent / "assets" / "icon.png"
+        icon_path = resource_path("assets/icon.png")
         if icon_path.exists():
             icon = QIcon(str(icon_path))
         else:
@@ -1587,10 +1601,14 @@ class MainWindow(QMainWindow):
                 self.show_normal_and_raise()
 
     def toggle_monitoring(self):
+        if self._closing or self._calibrating:
+            return
+        self._dispatch_generation += 1
         self.is_monitoring_paused = not self.is_monitoring_paused
         mode = self.config.get("active_mode", "knock")
 
         if self.is_monitoring_paused:
+            self.tap_detector.pause()
             if self.audio_engine.is_running:
                 self.audio_engine.stop()
             if self.voice_detector and self.voice_detector.is_running:
@@ -1632,8 +1650,20 @@ class MainWindow(QMainWindow):
                 elif self.audio_engine.is_running:
                     self._set_status_badge("● Knock Mode Active", "#00f0ff", "#0c2b32")
 
-    def on_gesture_received(self, gesture: DetectedTapGesture):
-        if self.config.get("active_mode", "knock") != "knock":
+    def _can_dispatch(self, mode, generation):
+        return (
+            not self._closing
+            and not self._calibrating
+            and not self.is_monitoring_paused
+            and generation == self._dispatch_generation
+            and self.config.get("active_mode", "knock") == mode
+            and (mode != "voice" or self.config.get("enable_voice_commands", True))
+        )
+
+    def on_gesture_received(self, gesture: DetectedTapGesture, generation=None):
+        if generation is None:
+            generation = self._dispatch_generation
+        if not self._can_dispatch("knock", generation):
             return
 
         self.waveform_widget.flash()
@@ -1669,19 +1699,24 @@ class MainWindow(QMainWindow):
         never touches the GUI thread, and returns within
         ``v1m_wait_timeout_ms`` even when the cloud is down or slow.
         """
+        generation = self._dispatch_generation
+        if not self._can_dispatch("voice", generation):
+            return
         if not self.voice_verifier:
             self.tap_detector.notify_speech_active(1.2)
-            self.bridge.voice_signal.emit(cmd, confidence, spoken_text or cmd, None)
+            self.bridge.voice_signal.emit(cmd, confidence, spoken_text or cmd, None, generation)
             return
         self.tap_detector.notify_speech_active(1.2)
         decision = self.voice_verifier.verify(
             cmd, spoken_text, confidence, alternates=alternates
         )
+        if not self._can_dispatch("voice", generation):
+            return
         if not decision.allow:
             self.bridge.voice_reject_signal.emit(decision)
             return
         # decision.command may differ from cmd when the model resolved the intent.
-        self.bridge.voice_signal.emit(decision.command, confidence, spoken_text or cmd, decision)
+        self.bridge.voice_signal.emit(decision.command, confidence, spoken_text or cmd, decision, generation)
 
     def on_voice_rejected(self, decision):
         """Badge/notification for a phrase the v1m guardrail vetoed."""
@@ -1706,8 +1741,10 @@ class MainWindow(QMainWindow):
             )
 
     def on_voice_received(self, word: str, confidence: float, spoken_text: str = "",
-                          decision=None):
-        if self.config.get("active_mode", "knock") != "voice":
+                          decision=None, generation=None):
+        if generation is None:
+            generation = self._dispatch_generation
+        if not self._can_dispatch("voice", generation):
             return
 
         action_name = resolve_voice_action(self.config, word)
@@ -1763,11 +1800,26 @@ class MainWindow(QMainWindow):
 
     def _dispatch_action(self, action_name, action_title):
         """Run OS actions on one worker so browser and process startup can't freeze Qt."""
-        future = self._action_pool.submit(self.executor.trigger, action_name)
+        generation = self._dispatch_generation
+        mode = self.config.get("active_mode", "knock")
+
+        def execute_if_current():
+            if self._can_dispatch(mode, generation):
+                return self.executor.trigger(action_name)
+            return None
+
+        if not self._can_dispatch(mode, generation):
+            return
+        future = self._action_pool.submit(execute_if_current)
 
         def finished(result, title=action_title):
+            if self._closing or result.cancelled():
+                return
             try:
-                succeeded = bool(result.result())
+                outcome = result.result()
+                if outcome is None or self._closing:
+                    return
+                succeeded = bool(outcome)
             except Exception:
                 succeeded = False
             self.bridge.action_result_signal.emit(title, succeeded)
@@ -1786,48 +1838,50 @@ class MainWindow(QMainWindow):
             self.run_voice_calibration()
 
     def run_tap_calibration(self):
-        import subprocess
-        from pathlib import Path
-        if self.voice_detector and self.voice_detector.is_running:
-            self.voice_detector.stop()
-        if self.audio_engine and self.audio_engine.is_running:
-            self.audio_engine.stop()
-        script = str(Path(__file__).parent / "calibrate.py")
-        if sys.platform == "win32" and not getattr(sys, "frozen", False):
-            process = subprocess.Popen(
-                [sys.executable, script],
-                cwd=str(Path(__file__).parent),
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-            )
-            self._resume_after_calibration(process)
-        else:
-            self._show_engine_error("Calibration launcher is available from source mode on Windows.")
-            QTimer.singleShot(0, lambda: self.switch_mode(self.config.get("active_mode", "knock")))
+        self._launch_calibration("calibrate.py")
 
     def run_voice_calibration(self):
+        self._launch_calibration("voice_calibrate.py")
+
+    def _launch_calibration(self, filename):
         import subprocess
         from pathlib import Path
+
+        if self._closing or self._calibrating:
+            return
+        if sys.platform != "win32" or getattr(sys, "frozen", False):
+            self._show_engine_error("Calibration launcher is available from source mode on Windows.")
+            return
+        self._calibrating = True
+        self._dispatch_generation += 1
+        self.tap_detector.pause()
         if self.voice_detector and self.voice_detector.is_running:
             self.voice_detector.stop()
         if self.audio_engine and self.audio_engine.is_running:
             self.audio_engine.stop()
-        script = str(Path(__file__).parent / "voice_calibrate.py")
-        if sys.platform == "win32" and not getattr(sys, "frozen", False):
+        script = str(Path(__file__).parent / filename)
+        try:
             process = subprocess.Popen(
                 [sys.executable, script],
                 cwd=str(Path(__file__).parent),
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
-            self._resume_after_calibration(process)
-        else:
-            self._show_engine_error("Voice calibration launcher is available from source mode on Windows.")
-            QTimer.singleShot(0, lambda: self.switch_mode(self.config.get("active_mode", "voice")))
+        except OSError as exc:
+            self._calibrating = False
+            if not self.is_monitoring_paused:
+                self.switch_mode(self.config.get("active_mode", "knock"))
+            self._show_engine_error(f"Could not launch calibration: {exc}")
+            return
+        self._resume_after_calibration(process)
 
     def _resume_after_calibration(self, process):
         def check_finished():
+            if self._closing:
+                return
             if process.poll() is None:
                 QTimer.singleShot(500, check_finished)
             else:
+                self._calibrating = False
                 mode = self.config.get("active_mode", "knock")
                 if not self.is_monitoring_paused:
                     self.switch_mode(mode)
@@ -1848,7 +1902,7 @@ class MainWindow(QMainWindow):
                 self.voice_sens_val_label.setText(f"{self.voice_sens_slider.value()}%")
                 self.voice_sens_slider.blockSignals(False)
             mode = self.config.get("active_mode", "knock")
-            if not self.is_monitoring_paused:
+            if not self.is_monitoring_paused and not self._calibrating and not self._closing:
                 if mode == "voice" and self.voice_detector and not self.voice_detector.is_running:
                     if not self.voice_detector.start():
                         self._show_engine_error(self.voice_detector.last_error)
@@ -1874,9 +1928,15 @@ class MainWindow(QMainWindow):
             self.clean_quit()
 
     def clean_quit(self):
+        if self._closing:
+            return
+        self._closing = True
+        self._dispatch_generation += 1
+        self.config.remove_listener(self._config_listener)
+        self._action_pool.shutdown(wait=False, cancel_futures=True)
         self.audio_engine.stop()
         if self.voice_detector:
-            self.voice_detector.stop()
+            self.voice_detector.cleanup()
         if self.voice_verifier:
             self.voice_verifier.shutdown()
         self.tap_detector.stop()

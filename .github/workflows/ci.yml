@@ -1,0 +1,25 @@
+name: Python checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip setuptools wheel
+      - run: python -m pip install ".[dev]"
+      - run: python -m ruff check .
+      - run: python -m pytest -q
+      - run: python -m mypy main.py gui.py action_executor.py audio_engine.py config_manager.py tap_detector.py voice_detector.py whisper_voice_detector.py oghdeii
+      - run: python -m pip wheel . --no-deps --no-build-isolation --wheel-dir dist
+      - run: oghdeii --help

@@ -44,8 +44,8 @@ DEFAULT_CONFIG = {
     "v1m_api_key": "",                # provide locally or via V1M_API_KEY; never ship credentials
     "v1m_endpoint": "https://v1m.ir/v1",
     "v1m_model": "v1m-latest",
-    "v1m_wait_timeout_ms": 3000,       # allow time for a typical cloud round trip
-    "v1m_request_timeout_ms": 5000,    # HTTP budget for the background call
+    "v1m_wait_timeout_ms": 8000,       # allow for slower model inference round trips
+    "v1m_request_timeout_ms": 10000,   # HTTP budget for the background call
     "v1m_min_probability": 0.55,       # P(is_valid_command) floor to execute
     "v1m_max_execution_risk": 4.0,     # 0..4 rubric; 4.0 == risk gate off
     "v1m_cache_ttl_s": 600,            # exact-phrase cache lifetime
@@ -151,6 +151,15 @@ class ConfigManager:
         ):
             merged["v1m_wait_timeout_ms"] = DEFAULT_CONFIG["v1m_wait_timeout_ms"]
             merged["v1m_request_timeout_ms"] = DEFAULT_CONFIG["v1m_request_timeout_ms"]
+        # The previous defaults ended the caller's wait at 3s while the HTTP
+        # request could run for 5s. A normal model response taking just over
+        # 3s therefore appeared as a timeout even though the request was live.
+        if (
+            merged.get("v1m_wait_timeout_ms") == 3000
+            and merged.get("v1m_request_timeout_ms") == 5000
+        ):
+            merged["v1m_wait_timeout_ms"] = DEFAULT_CONFIG["v1m_wait_timeout_ms"]
+            merged["v1m_request_timeout_ms"] = DEFAULT_CONFIG["v1m_request_timeout_ms"]
         return ConfigManager._sanitize(merged)
 
     @staticmethod
@@ -158,7 +167,7 @@ class ConfigManager:
         def as_float(key, default, low, high):
             try:
                 value = float(cfg.get(key, default))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 value = float(default)
             if value != value or value in (float("inf"), float("-inf")):
                 value = float(default)
@@ -167,7 +176,7 @@ class ConfigManager:
         def as_int(key, default, low, high):
             try:
                 value = int(cfg.get(key, default))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 value = int(default)
             cfg[key] = min(high, max(low, value))
 
@@ -180,8 +189,8 @@ class ConfigManager:
         as_float("sensitivity", 0.90, 0.10, 1.0)
         as_float("voice_confidence_threshold", 0.55, 0.20, 0.95)
         as_int("voice_command_cooldown_ms", 650, 0, 10000)
-        as_int("v1m_wait_timeout_ms", 3000, 10, 10000)
-        as_int("v1m_request_timeout_ms", 5000, 100, 60000)
+        as_int("v1m_wait_timeout_ms", 8000, 10, 10000)
+        as_int("v1m_request_timeout_ms", 10000, 100, 60000)
         as_float("v1m_min_probability", 0.55, 0.0, 1.0)
         as_float("v1m_max_execution_risk", 4.0, 0.0, 4.0)
         as_int("v1m_cache_ttl_s", 600, 0, 86400)
@@ -232,7 +241,7 @@ class ConfigManager:
         try:
             selected = cfg.get("selected_input_device")
             cfg["selected_input_device"] = None if selected is None else max(0, int(selected))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cfg["selected_input_device"] = None
         signature = cfg.get("selected_input_device_signature")
         cfg["selected_input_device_signature"] = str(signature)[:500] if signature else None
@@ -336,6 +345,9 @@ class ConfigManager:
                 merged = self._sanitize(self._apply_local_changes(disk_config))
                 changed = merged != self.config
                 self.config = merged
+                # Adopted external edits are the new baseline, not local
+                # changes to replay over the next external writer.
+                self._persisted = copy.deepcopy(disk_config)
             else:
                 changed = disk_config != self.config
                 self.config = disk_config
@@ -409,9 +421,28 @@ class ConfigManager:
     def save(self):
         """Atomically persist config, merging in changes made by other processes.
 
-        A crash cannot leave a half-written JSON file, and a stale copy from
-        this process can no longer clobber keys another process just wrote.
+        Lock the complete read/merge/replace transaction across processes.
+        Atomic replacement alone cannot prevent two writers reading the same
+        old snapshot and then overwriting one another's independent edits.
         """
+        from PyQt6.QtCore import QLockFile
+
+        with self._io_lock:
+            lock = QLockFile(str(self.config_dir / "config.lock"))
+            if not lock.tryLock(5000):
+                self.last_error = "Could not acquire the settings lock; changes are still pending."
+                self._dirty = True
+                return False
+            try:
+                result, adopted_external = self._save_locked()
+            finally:
+                lock.unlock()
+        if adopted_external:
+            self._notify()
+        return result
+
+    def _save_locked(self):
+        """Read, merge, and replace while the settings lock is held."""
         with self._io_lock:
             self._cancel_debounce_locked()
             disk_config = None
@@ -454,9 +485,7 @@ class ConfigManager:
                     except Exception:
                         pass
                 result = False
-        if adopted_external:
-            self._notify()
-        return result
+        return result, adopted_external
 
     def get(self, key, default=None):
         self.reload_if_changed()
@@ -470,10 +499,11 @@ class ConfigManager:
         updates such as slider drags; call flush() before exiting.
         """
         self.reload_if_changed()
-        previous = self.config.get(key)
-        value = self._sanitize({**self.config, key: value}).get(key)
-        self.config[key] = value
-        self._dirty = True
+        with self._io_lock:
+            previous = self.config.get(key)
+            self.config = self._sanitize({**self.config, key: value})
+            value = self.config.get(key)
+            self._dirty = True
         autostart_key = key in ("start_with_windows", "start_with_system")
         if flush or autostart_key:
             saved = self.save()
@@ -498,9 +528,9 @@ class ConfigManager:
         if not isinstance(values, dict):
             raise TypeError("Config update must be a dictionary")
         self.reload_if_changed()
-        sanitized = self._sanitize({**self.config, **values})
-        self.config.update({key: sanitized[key] for key in values})
-        self._dirty = True
+        with self._io_lock:
+            self.config = self._sanitize({**self.config, **values})
+            self._dirty = True
         if flush:
             saved = self.save()
         else:

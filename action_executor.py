@@ -378,7 +378,7 @@ class ActionExecutor:
         key = PynputKey
         if action_name in {"copy", "paste", "undo", "redo", "select_all"}:
             char = {"copy": "c", "paste": "v", "undo": "z", "redo": "y", "select_all": "a"}[action_name]
-            self._execute_linux_hotkey(key.ctrl if key else "ctrl", char)
+            return self._execute_linux_hotkey(key.ctrl if key else "ctrl", char)
         elif action_name == "screenshot":
             if shutil.which("gnome-screenshot"):
                 subprocess.Popen(["gnome-screenshot", "-a"])
@@ -387,15 +387,15 @@ class ActionExecutor:
             elif shutil.which("scrot"):
                 subprocess.Popen(["scrot", "-s"])
             else:
-                self._execute_linux_hotkey(key.print_screen if key else "Print")
+                return self._execute_linux_hotkey(key.print_screen if key else "Print")
         elif action_name == "task_view":
-            self._execute_linux_hotkey(key.cmd if key else "super")
+            return self._execute_linux_hotkey(key.cmd if key else "super")
         elif action_name == "show_desktop":
-            self._execute_linux_hotkey(key.cmd if key else "super", "d")
+            return self._execute_linux_hotkey(key.cmd if key else "super", "d")
         elif action_name == "close_window":
-            self._execute_linux_hotkey(key.alt if key else "alt", key.f4 if key else "F4")
+            return self._execute_linux_hotkey(key.alt if key else "alt", key.f4 if key else "F4")
         elif action_name == "switch_window":
-            self._execute_linux_hotkey(key.alt if key else "alt", key.tab if key else "Tab")
+            return self._execute_linux_hotkey(key.alt if key else "alt", key.tab if key else "Tab")
         elif action_name in {"play_pause", "next_track", "prev_track"}:
             if shutil.which("playerctl"):
                 subcmd = {"play_pause": "play-pause", "next_track": "next", "prev_track": "previous"}[action_name]
@@ -439,7 +439,7 @@ class ActionExecutor:
             else:
                 raise RuntimeError("No text editor found")
         elif action_name == "open_browser":
-            webbrowser.open("https://www.google.com", new=2)
+            return webbrowser.open("https://www.google.com", new=2)
         elif action_name == "open_terminal":
             for app in ("x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "xterm"):
                 if shutil.which(app):

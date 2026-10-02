@@ -5,9 +5,9 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 from config_manager import ConfigManager
+from oghdeii.resources import resource_path
 
 CALIBRATION_PHRASES = {
     "copy": "copy that",
@@ -40,7 +40,7 @@ def make_meter(val, max_len=10):
 class VoiceCalibrator:
     def __init__(self):
         self.config = ConfigManager()
-        self.exe_path = Path(__file__).parent / "VoiceRecognizerV1M.exe"
+        self.exe_path = resource_path("VoiceRecognizerV1M.exe")
         if os.name != "nt":
             raise RuntimeError("Voice calibration requires Windows System.Speech.")
         if not self.exe_path.exists():

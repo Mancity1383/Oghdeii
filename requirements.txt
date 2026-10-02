@@ -1,10 +1,10 @@
 # عقده ای / Oghdeii runtime requirements
-numpy>=1.24.0
-scipy>=1.10.0
-sounddevice>=0.4.6
+numpy>=1.24,<3
+scipy>=1.10,<2
+sounddevice>=0.4.6,<1
 faster-whisper>=1.1.0,<2
 huggingface-hub>=0.21,<2
-PyQt6>=6.5.0
-pynput>=1.7.6
-typesafe-sdk>=0.7.1,<1
-pyinstaller>=6.0.0
+PyQt6>=6.5,<7
+pynput>=1.7.6,<2
+typesafe-sdk>=0.7,<1
+pyinstaller>=6,<7

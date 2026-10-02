@@ -169,7 +169,7 @@ class WhisperVoiceDetector:
         self._last_config_notice = 0.0
         self._startup_event = threading.Event()
         self._frame_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=120)
-        self._utterance_queue: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=8)
+        self._utterance_queue: queue.Queue[tuple[np.ndarray, int] | None] = queue.Queue(maxsize=8)
         self._thread = None
         self._transcribe_thread = None
         self._stream = None
@@ -179,6 +179,7 @@ class WhisperVoiceDetector:
         self._model = None
         self._sample_rate = 16000
         self._input_rate = 16000
+        self._using_default_input_fallback = False
         self._noise_rms = 0.003
         self._last_trigger_at = float("-inf")
         config_manager.add_listener(self._on_config_changed)
@@ -259,7 +260,9 @@ class WhisperVoiceDetector:
                         break
             self.is_running = True
             self._set_state("starting", "Loading local faster-whisper model…")
-            self._thread = threading.Thread(target=self._run_capture, args=(session_id,), name="WhisperVoiceCapture", daemon=True)
+            self._thread = threading.Thread(
+                target=self._run_capture, args=(session_id,), name="WhisperVoiceCapture", daemon=True,
+            )
             self._transcribe_thread = threading.Thread(
                 target=self._run_transcriber, args=(session_id,),
                 name="WhisperVoiceTranscriber", daemon=True,
@@ -306,7 +309,10 @@ class WhisperVoiceDetector:
                 return
             self._sounddevice = sd
             self._stream = self._open_stream(sd)
-            self._set_state("ready", f"Local Whisper ready ({self._model_name()}; {compute_type}).")
+            ready_message = f"Local Whisper ready ({self._model_name()}; {compute_type})."
+            if self._using_default_input_fallback:
+                ready_message += " The selected device was silent; using the system default microphone."
+            self._set_state("ready", ready_message)
             self._capture_loop(sd, session_id)
         except Exception as exc:
             failed = True
@@ -324,43 +330,69 @@ class WhisperVoiceDetector:
                 self._set_state("stopped", "Whisper voice engine stopped.")
 
     def _open_stream(self, sd):
-        blocksize = int(self._sample_rate * self.FRAME_MS / 1000)
-        self._opened_input_snapshot = self._input_snapshot()
-        device = self._opened_input_snapshot[0]
-        stream_kwargs = {"device": device} if device is not None else {}
-        try:
-            stream = sd.InputStream(
-                samplerate=self._sample_rate, channels=1, dtype="float32",
-                blocksize=blocksize, callback=self._audio_callback, **stream_kwargs,
-            )
-            self._input_rate = self._sample_rate
-        except Exception:
+        snapshot = self._input_snapshot()
+        requested_device = snapshot[0]
+        self._opened_input_snapshot = snapshot
+        devices = [requested_device]
+        if requested_device is not None:
+            # A stale or inactive WDM-KS endpoint can report a successful
+            # start without ever invoking its callback. Try the system input
+            # mapper as a real fallback, not just when InputStream raises.
+            devices.append(None)
+
+        attempts = []
+        for device in devices:
             try:
-                info = sd.query_devices(device, "input") if device is not None else sd.query_devices(kind="input")
-            except Exception:
-                info = sd.query_devices(kind="input")
-            self._input_rate = int(float(info.get("default_samplerate", 16000)))
-            blocksize = max(1, int(self._input_rate * self.FRAME_MS / 1000))
-            try:
-                stream = sd.InputStream(
-                    samplerate=self._input_rate, channels=1, dtype="float32",
-                    blocksize=blocksize, callback=self._audio_callback, **stream_kwargs,
+                info = (
+                    sd.query_devices(device, "input")
+                    if device is not None else sd.query_devices(kind="input")
                 )
-            except Exception:
-                # A stale device index should not prevent Voice Mode from
-                # using the current default microphone.
+                native_rate = int(float(info.get("default_samplerate", self._sample_rate)))
+            except Exception as exc:
+                attempts.append(f"device {device}: {exc}")
+                native_rate = self._sample_rate
+            rates = list(dict.fromkeys((self._sample_rate, native_rate)))
+
+            for rate in rates:
+                callback_seen = threading.Event()
+
+                def audio_callback(indata, frames, time_info, status, event=callback_seen):
+                    event.set()
+                    self._audio_callback(indata, frames, time_info, status)
+
+                kwargs = {"device": device} if device is not None else {}
+                stream = None
                 try:
-                    default_info = sd.query_devices(kind="input")
-                    self._input_rate = int(float(default_info.get("default_samplerate", 16000)))
-                    blocksize = max(1, int(self._input_rate * self.FRAME_MS / 1000))
-                except Exception:
-                    pass
-                stream = sd.InputStream(
-                    samplerate=self._input_rate, channels=1, dtype="float32",
-                    blocksize=blocksize, callback=self._audio_callback,
-                )
-        stream.start()
-        return stream
+                    stream = sd.InputStream(
+                        samplerate=rate,
+                        channels=1,
+                        dtype="float32",
+                        blocksize=max(1, int(rate * self.FRAME_MS / 1000)),
+                        callback=audio_callback,
+                        **kwargs,
+                    )
+                    stream.start()
+                    if not callback_seen.wait(0.6) or not stream.active:
+                        raise RuntimeError("input stream started without delivering audio frames")
+                    self._input_rate = rate
+                    self._using_default_input_fallback = (
+                        requested_device is not None and device is None
+                    )
+                    return stream
+                except Exception as exc:
+                    attempts.append(f"device {device}, {rate} Hz: {exc}")
+                    if stream is not None:
+                        try:
+                            stream.stop()
+                        except Exception:
+                            pass
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+
+        detail = "; ".join(attempts[-4:]) or "no input device was available"
+        raise RuntimeError(f"No microphone delivered audio frames ({detail})")
 
     def _close_stream(self):
         stream, self._stream = self._stream, None
@@ -414,17 +446,26 @@ class WhisperVoiceDetector:
                 old_stream, self._stream = self._stream, new_stream
                 if old_stream is not None:
                     try:
-                        old_stream.stop(); old_stream.close()
+                        old_stream.stop()
+                    except Exception:
+                        pass
+                    try:
+                        old_stream.close()
                     except Exception:
                         pass
                 retry_delay = 0.25
                 self._stream_restart_event.clear()
                 while True:
-                    try: self._frame_queue.get_nowait()
-                    except queue.Empty: break
+                    try:
+                        self._frame_queue.get_nowait()
+                    except queue.Empty:
+                        break
                 self._noise_rms = 0.003
-                active = False; utterance.clear(); pre_roll.clear()
-                speech_frames = 0; silence_ms = 0
+                active = False
+                utterance.clear()
+                pre_roll.clear()
+                speech_frames = 0
+                silence_ms = 0
                 self._set_state("ready", "Whisper voice recognition is running.")
                 continue
             try:
@@ -468,12 +509,15 @@ class WhisperVoiceDetector:
                 silence_ms = 0
             else:
                 silence_ms += int(len(frame) * 1000 / self._input_rate) if self._input_rate > 0 else self.FRAME_MS
-            elapsed_ms = int(sum(len(f) for f in utterance) * 1000 / self._input_rate) if self._input_rate > 0 else len(utterance) * self.FRAME_MS
+            elapsed_ms = (
+                int(sum(len(f) for f in utterance) * 1000 / self._input_rate)
+                if self._input_rate > 0 else len(utterance) * self.FRAME_MS
+            )
             if silence_ms >= self.END_SILENCE_MS or elapsed_ms >= self.MAX_UTTERANCE_MS:
                 if elapsed_ms - silence_ms >= self.MIN_UTTERANCE_MS:
                     audio = np.concatenate(utterance).astype(np.float32, copy=False)
                     try:
-                        self._utterance_queue.put_nowait(audio)
+                        self._utterance_queue.put_nowait((audio, self._input_rate))
                     except queue.Full:
                         pass
                 active = False
@@ -482,22 +526,23 @@ class WhisperVoiceDetector:
                 speech_frames = 0
                 silence_ms = 0
 
-    def _prepare_audio(self, audio):
+    def _prepare_audio(self, audio, input_rate=None):
         if audio is None or len(audio) == 0:
             return audio
         # 1. DC offset removal
         audio = audio - float(np.mean(audio))
         # 2. Resample if necessary to 16kHz
-        if self._input_rate != self._sample_rate:
+        input_rate = self._input_rate if input_rate is None else input_rate
+        if input_rate != self._sample_rate:
             try:
                 from scipy.signal import resample_poly
-                divisor = math.gcd(self._input_rate, self._sample_rate)
+                divisor = math.gcd(input_rate, self._sample_rate)
                 audio = np.asarray(
-                    resample_poly(audio, self._sample_rate // divisor, self._input_rate // divisor),
+                    resample_poly(audio, self._sample_rate // divisor, input_rate // divisor),
                     dtype=np.float32,
                 )
             except Exception:
-                duration = len(audio) / max(1, self._input_rate)
+                duration = len(audio) / max(1, input_rate)
                 target_samples = int(duration * self._sample_rate)
                 orig_indices = np.linspace(0, duration, len(audio), endpoint=False)
                 target_indices = np.linspace(0, duration, target_samples, endpoint=False)
@@ -511,22 +556,23 @@ class WhisperVoiceDetector:
     def _run_transcriber(self, session_id):
         while session_id == self._session_id and not self._stop_event.is_set():
             try:
-                audio = self._utterance_queue.get(timeout=0.2)
+                utterance = self._utterance_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            if audio is None:
+            if utterance is None:
                 return
             if self._stop_event.is_set():
                 return
             try:
-                self._transcribe(audio)
+                audio, input_rate = utterance
+                self._transcribe(audio, input_rate=input_rate)
             except Exception as exc:
                 print(f"[WhisperVoice] Transcription failed: {exc}")
 
-    def _transcribe(self, audio):
+    def _transcribe(self, audio, input_rate=None):
         if self._model is None:
             return
-        audio = self._prepare_audio(audio)
+        audio = self._prepare_audio(audio, input_rate=input_rate)
         # Greedy search (beam_size=1, best_of=1) reduces decoding latency by 35-50%
         # for short domain-prompted command phrases while avoiding beam search wandering.
         transcribe_kwargs = {
@@ -548,8 +594,11 @@ class WhisperVoiceDetector:
                 "laptop mute, laptop volume up, laptop volume down."
             ),
         }
-        # Try transcription with Silero VAD filtering enabled for speed and noise rejection;
-        # fallback without VAD filter if the optional Silero backend is missing.
+        # The capture thread already segments utterances with its adaptive VAD.
+        # Silero is an optional second pass: it can occasionally erase the
+        # short wake word or return no segments for a quiet utterance. Retry
+        # the same audio without Silero in those cases so a VAD false negative
+        # cannot silently swallow every command.
         try:
             segments, _info = self._model.transcribe(
                 audio,
@@ -562,14 +611,44 @@ class WhisperVoiceDetector:
                 **transcribe_kwargs,
             )
             parts = list(segments)
-        except Exception:
+        except Exception as exc:
+            print(f"[WhisperVoice] Silero VAD pass failed; retrying without it: {exc}")
+            parts = []
+
+        raw = normalize_transcript(" ".join(str(segment.text or "") for segment in parts))
+        wake_required = bool(self.config_manager.get("voice_require_wake_word", True))
+        command, similarity = command_from_text(raw)
+        try:
+            threshold = float(self.config_manager.get("voice_confidence_threshold", 0.55))
+        except (TypeError, ValueError):
+            threshold = 0.55
+        cloud_enabled = bool(self.config_manager.get("enable_v1m_verification", False))
+        min_confidence = (
+            max(self.MIN_CLOUD_CONFIDENCE, threshold * 0.35)
+            if cloud_enabled else threshold
+        )
+        preview_logprob = sum(
+            float(getattr(segment, "avg_logprob", -1.5)) for segment in parts
+        ) / max(1, len(parts))
+        preview_confidence = max(0.05, min(0.99, math.exp(min(0.0, preview_logprob))))
+        no_speech_probs = [float(getattr(segment, "no_speech_prob", 0.0)) for segment in parts]
+        should_retry_without_vad = (
+            not raw
+            or (wake_required and not has_wake_word(raw))
+            or (has_wake_word(raw) and not command)
+            or (parts and preview_confidence < min_confidence)
+            or (no_speech_probs and all(prob >= 0.65 for prob in no_speech_probs))
+        )
+        if should_retry_without_vad:
             segments, _info = self._model.transcribe(
                 audio,
                 vad_filter=False,
                 **transcribe_kwargs,
             )
             parts = list(segments)
-        raw = normalize_transcript(" ".join(str(segment.text or "") for segment in parts))
+            raw = normalize_transcript(
+                " ".join(str(segment.text or "") for segment in parts)
+            )
         if not raw:
             return
         if looks_like_repetition_hallucination(raw):
@@ -586,11 +665,6 @@ class WhisperVoiceDetector:
         ):
             # No local mapping is not a command candidate in offline mode.
             return
-        try:
-            threshold = float(self.config_manager.get("voice_confidence_threshold", 0.55))
-        except (TypeError, ValueError):
-            threshold = 0.55
-        cloud_enabled = bool(self.config_manager.get("enable_v1m_verification", False))
         if confidence < threshold and not cloud_enabled:
             return
         if cloud_enabled and confidence < max(self.MIN_CLOUD_CONFIDENCE, threshold * 0.35):
@@ -629,8 +703,10 @@ class WhisperVoiceDetector:
             self._stop_event.set()
             self._close_stream()
             for q in (self._frame_queue, self._utterance_queue):
-                try: q.put_nowait(None)
-                except queue.Full: pass
+                try:
+                    q.put_nowait(None)
+                except queue.Full:
+                    pass
             threads = (self._thread, self._transcribe_thread)
         # Never report stopped or permit another session while either worker
         # can still touch this detector/model.

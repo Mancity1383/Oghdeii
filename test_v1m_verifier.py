@@ -690,7 +690,7 @@ class UtilityTests(VerifierTestBase):
         ):
             self.assertIn(key, DEFAULT_CONFIG)
         self.assertFalse(DEFAULT_CONFIG["enable_v1m_verification"])
-        self.assertEqual(DEFAULT_CONFIG["v1m_wait_timeout_ms"], 3000)
+        self.assertEqual(DEFAULT_CONFIG["v1m_wait_timeout_ms"], 8000)
         self.assertEqual(DEFAULT_CONFIG["v1m_min_probability"], 0.55)
 
         # Hostile/garbage values must never reach the client constructor.
@@ -701,7 +701,7 @@ class UtilityTests(VerifierTestBase):
             "v1m_endpoint": "",
             "v1m_model": None,
         })
-        self.assertEqual(self.config.get("v1m_wait_timeout_ms"), 3000)
+        self.assertEqual(self.config.get("v1m_wait_timeout_ms"), 8000)
         self.assertEqual(self.config.get("v1m_min_probability"), 1.0)
         self.assertEqual(self.config.get("v1m_max_execution_risk"), 0.0)
         self.assertEqual(self.config.get("v1m_endpoint"), "https://v1m.ir/v1")

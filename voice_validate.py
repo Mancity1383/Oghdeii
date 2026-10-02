@@ -13,9 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from config_manager import ConfigManager
+from oghdeii.resources import resource_path
 
 ROOT = Path(__file__).resolve().parent
-HELPER = ROOT / "VoiceRecognizerV1M.exe"
+HELPER = resource_path("VoiceRecognizerV1M.exe")
 REPORT = ROOT / "voice_validation_report.json"
 DEFAULT_COMMANDS = (
     ("copy", "copy that"),

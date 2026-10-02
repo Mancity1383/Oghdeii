@@ -274,6 +274,7 @@ class TapDetector:
     def pause(self):
         """Release the global keyboard hook while keeping the detector reusable."""
         with self.lock:
+            self._stopped = True
             self._invalidate_timers_locked()
             self._clear_group_locked()
         listener, self.keyboard_listener = self.keyboard_listener, None

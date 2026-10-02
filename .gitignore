@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.cache/
+.benchmarks/
 .coverage
 htmlcov/
 tap_validation_report.json

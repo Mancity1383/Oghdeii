@@ -13,6 +13,7 @@ from action_executor import (
 from audio_engine import AudioEngine
 from config_manager import ConfigManager
 from gui import MainWindow
+from oghdeii.resources import resource_path
 from oghdeii.voice.v1m_verifier import V1MVoiceVerifier
 from tap_detector import TapDetector
 from voice_detector import VoiceDetector
@@ -142,6 +143,11 @@ def run_cli_mode(config, executor, detector, audio, voice, verifier):
 
 
 def main():
+    # Redirected Windows output often defaults to a legacy code page that
+    # cannot encode the Persian app name, including in --help and errors.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="عقده ای — میانبرهای ضربه و صدا")
     parser.add_argument("--cli", action="store_true", help="Run in headless console mode without GUI")
     parser.add_argument("--minimized", "--tray", action="store_true", help="Start minimized to system tray")
@@ -189,7 +195,7 @@ def main():
         try:
             import faster_whisper  # noqa: F401
         except Exception:
-            if sys.platform == "win32" and (Path(__file__).parent / "VoiceRecognizerV1M.exe").exists():
+            if sys.platform == "win32" and (resource_path("VoiceRecognizerV1M.exe")).exists():
                 print("[Voice] faster-whisper is not installed; falling back to Windows Speech helper.")
                 config.set("voice_backend", "windows")
                 voice_backend = "windows"
@@ -209,12 +215,8 @@ def main():
         config, audio, detector, executor,
         voice_detector=voice, voice_verifier=verifier,
     )
-    voice_cleanup = getattr(voice, "cleanup", voice.stop)
-    app.aboutToQuit.connect(audio.stop)
-    app.aboutToQuit.connect(voice_cleanup)
-    app.aboutToQuit.connect(detector.stop)
-    app.aboutToQuit.connect(verifier.shutdown)
-    app.aboutToQuit.connect(config.flush)
+    # The window owns the current backend, which can change in Settings.
+    app.aboutToQuit.connect(window.clean_quit)
     if not args.minimized:
         window.show()
     else:

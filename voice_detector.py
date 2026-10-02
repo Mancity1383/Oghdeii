@@ -4,7 +4,8 @@ import re
 import subprocess
 import threading
 import time
-from pathlib import Path
+
+from oghdeii.resources import resource_path
 
 VOICE_COMMANDS = {
     "copy", "paste", "undo", "redo", "select_all", "screenshot", "lock",
@@ -96,7 +97,7 @@ class VoiceDetector:
         self.thread = None
         self.stderr_thread = None
         self.monitor_thread = None
-        self.exe_path = Path(__file__).parent / "VoiceRecognizerV1M.exe"
+        self.exe_path = resource_path("VoiceRecognizerV1M.exe")
         self._lock = threading.RLock()
         self._stdin_lock = threading.Lock()   # serializes quit/ping writes
         self._startup_event = threading.Event()

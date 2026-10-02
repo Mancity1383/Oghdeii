@@ -16,11 +16,11 @@ if exist ".venv\Scripts\pyinstaller.exe" (
     set "PY_CMD=.venv\Scripts\pyinstaller.exe"
 ) else (
     where pyinstaller >nul 2>&1
-    if %ERRORLEVEL% EQU 0 (
+    if !ERRORLEVEL! EQU 0 (
         set "PY_CMD=pyinstaller"
     ) else (
         where py >nul 2>&1
-        if %ERRORLEVEL% EQU 0 (
+        if !ERRORLEVEL! EQU 0 (
             set "PY_CMD=py -3.12 -m PyInstaller"
         ) else (
             set "PY_CMD=python -m PyInstaller"

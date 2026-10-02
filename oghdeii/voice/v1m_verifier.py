@@ -19,7 +19,7 @@ Latency contract
 ----------------
 ``verify()`` is called from the recogniser's stdout reader thread and
 
-1. never blocks that thread longer than ``v1m_wait_timeout_ms`` (default 3000 ms),
+1. never blocks that thread longer than ``v1m_wait_timeout_ms`` (default 8000 ms),
 2. never performs network I/O on that thread — the HTTP call runs on an
    internal worker pool — and
 3. never raises: when cloud verification is enabled, unavailable or malformed
@@ -42,6 +42,7 @@ variable) is honoured as a secondary environment source.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -75,8 +76,8 @@ __all__ = [
 DEFAULT_ENDPOINT = "https://v1m.ir/v1"
 DEFAULT_MODEL = "v1m-latest"
 
-DEFAULT_WAIT_TIMEOUT_MS = 3000     # bounded wait for a typical cloud round trip
-DEFAULT_REQUEST_TIMEOUT_MS = 5000 # HTTP budget for the (background) call
+DEFAULT_WAIT_TIMEOUT_MS = 8000     # bounded wait for slower model inference round trips
+DEFAULT_REQUEST_TIMEOUT_MS = 10000 # HTTP budget for the (background) call
 DEFAULT_MIN_PROBABILITY = 0.55     # P(is_valid_command) floor
 DEFAULT_MAX_EXECUTION_RISK = 4.0   # rubric is 0..4; 4.0 == gate effectively off
 DEFAULT_CACHE_TTL_S = 600.0
@@ -584,7 +585,7 @@ class V1MVoiceVerifier:
     ) -> VerificationResult:
         """Gate one recognised phrase. Bounded, exception-free, thread-safe.
 
-        Returns within ``v1m_wait_timeout_ms`` (default 3000 ms) even when the
+        Returns within ``v1m_wait_timeout_ms`` (default 8000 ms) even when the
         cloud is down or slow; never raises.
         """
         started = time.monotonic()
@@ -1109,9 +1110,8 @@ class V1MVoiceVerifier:
         if raw_probability is None:
             raise ValueError("v1m response is missing is_valid_command")
         probability = float(raw_probability)
-        if probability != probability:  # NaN
-            raise ValueError("v1m returned a non-numeric is_valid_command")
-        probability = min(1.0, max(0.0, probability))
+        if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise ValueError("v1m returned an invalid is_valid_command probability")
 
         choice = answers.get(Q_ACTION)
         raw_action = getattr(choice, "choice", None)
@@ -1155,6 +1155,8 @@ class V1MVoiceVerifier:
                 raw_risk = score.get("score")
             if raw_risk is not None:
                 risk = float(raw_risk)
+                if not math.isfinite(risk) or not 0.0 <= risk <= 4.0:
+                    raise ValueError("v1m returned an invalid execution_risk score")
             raw_conf = getattr(score, "confidence", None)
             if raw_conf is None and isinstance(score, dict):
                 raw_conf = score.get("confidence")
